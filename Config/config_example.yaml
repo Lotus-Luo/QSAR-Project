@@ -1,0 +1,81 @@
+# QSAR Modeling Configuration Example
+# QSAR 建模配置示例
+
+# ========== 基本配置 ==========
+# Input data path
+# 输入数据路径
+input_path: "Data/test_data.csv"
+
+# Column names
+# 列名
+label_column: "label"      # Binary classification label (0 or 1) / 二分类标签
+pic50_column: "pic50"      # Continuous pIC50 value for regression / 回归任务的 pIC50 值
+smiles_column: "smiles"    # SMILES string / SMILES 字符串
+id_column: "id"            # Molecular identifier / 分子标识符
+
+# Task type: classification or regression
+# 任务类型
+task: "classification"
+
+# ========== 数据划分 ==========
+# Data split parameters
+# 数据划分参数
+test_size: 0.2             # Test set fraction (0.0-1.0) / 测试集比例
+folds: 5                   # Number of CV folds / 交叉验证折数
+seed: 42                   # Random seed for reproducibility / 随机种子
+
+# ========== 模型选择 ==========
+# Models to train (comma-separated list)
+# 要训练的模型列表
+# Available models / 可用模型:
+#   Traditional: LR, RFC, SVC, XGBC, LGBMC, ETC, Ridge, RFR, ETR
+#   Deep Learning: MLP, GAT, ChemBERTa
+selected_models:
+  - "XGBC"        # XGBoost Classifier
+  - "RFC"         # Random Forest Classifier
+  - "MLP"         # Multi-Layer Perceptron (Deep Learning)
+
+# ========== 输出配置 ==========
+# Output directory
+# 输出目录
+output_dir: "models_output"
+
+# ========== 特征工程 ==========
+# Feature filtering
+# 特征过滤
+variance_threshold: 0.01    # Variance threshold for feature removal / 特征方差阈值
+
+# ========== 深度学习参数 ==========
+# Deep learning hyperparameters
+# 深度学习超参数
+max_epochs: 100            # Maximum training epochs / 最大训练轮数
+batch_size: 32             # Batch size for training / 批次大小
+learning_rate: 0.001       # Learning rate / 学习率
+
+# ========== SHAP 分析 ==========
+# SHAP interpretability analysis
+# SHAP 可解释性分析
+run_shap: true             # Run SHAP analysis / 运行 SHAP 分析
+shap_max_display: 20       # Maximum features to display in plots / 图中显示的最大特征数
+shap_sample_size: 500      # Sample size for SHAP computation / SHAP 计算的采样大小
+
+# ========== 评估指标 ==========
+# Early Enrichment Factor
+# 早期富集因子
+ef_percentile: 1.0         # EF% percentile (e.g., 1.0 for EF1%) / EF% 百分位
+
+# ========== 多模态融合 (可选) ==========
+# Multi-modal fusion (optional)
+# 多模态融合（可选）
+enable_multimodal: false   # Enable multi-modal fusion / 启用多模态融合
+multimodal_weights:        # Weights for different model types / 不同模型类型的权重
+  traditional: 0.5
+  deep_learning: 0.5
+
+# ========== 其他配置 ==========
+# Additional configuration
+# 其他配置
+# tune: false               # Hyperparameter tuning (not implemented yet) / 超参数调优（尚未实现）
+# tune_iter: 25            # Number of tuning iterations / 调优迭代次数
+# create_ensemble: false    # Create ensemble model / 创建集成模型
+# ensemble_n_top: 3         # Number of top models for ensemble / 集成的最优模型数量

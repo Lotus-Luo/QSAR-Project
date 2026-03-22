@@ -1,0 +1,15 @@
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+
+# 忽略日志和临时文件
+*.log
+error_log.txt
+problem.txt
+
+# 忽略 VS Code 配置
+.vscode/
+
+# 忽略大型数据文件（如果你的数据集很大，建议忽略）
+*.csv
+*.sdf

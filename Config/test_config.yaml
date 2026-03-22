@@ -1,0 +1,346 @@
+# QSAR Modeling Configuration File
+# This configuration file is used for testing qsar_modeling_pytorch.py
+# Modify the parameters below to customize your modeling pipeline
+
+# Basic Configuration
+# ------------------------------------------------------------------------------
+# Path to input CSV/Parquet file containing molecular data
+# The file must contain at least: id, smiles, and label/pic50 columns
+input_path: "./Data/test_data_complex_with_fingerprints.csv"
+
+# Column name for binary classification labels (0 or 1)
+# Used for classification tasks
+label_column: "label"
+
+# Column name for continuous pIC50 values
+# Used for regression tasks
+pic50_column: "pic50"
+
+# Column name for SMILES strings
+# Required for GAT, ChemBERTa, and scaffold-based splitting
+smiles_column: "smiles"
+
+# Column name for molecular unique identifiers (e.g., ChEMBL ID)
+id_column: "id"
+
+# ------------------------------------------------------------------------------
+# Task Configuration
+# ------------------------------------------------------------------------------
+
+# Type of machine learning task
+# Options:
+#   - "classification": Binary classification (active/inactive)
+#   - "regression": Continuous value prediction (pIC50)
+task: "classification"
+
+# ------------------------------------------------------------------------------
+# Data Splitting Configuration
+# ------------------------------------------------------------------------------
+
+# Fraction of data to reserve for the external test set (when folds > 1)
+# Options: 0.1 to 0.5 (recommended: 0.2 for 20% test set)
+test_size: 0.2
+
+# Number of cross-validation folds for model training and evaluation
+# Options:
+#   - 1: Single train/validation split (supports model saving and SHAP analysis)
+#   - 3-5: Recommended for small to medium datasets
+#   - 5-10: Recommended for larger datasets
+# Note: When folds > 1, two-stage validation is performed:
+#   Stage 1: Split into External Test Set and Development Set
+#   Stage 2: K-Fold CV on Development Set
+#   Stage 3: Evaluate all models on External Test Set
+folds: 5
+
+# Random seed for reproducibility
+# Options: Any integer (recommended: 42 for consistency)
+seed: 42
+
+# Multiple random seeds for robustness testing
+# When provided, each model will be trained multiple times with different seeds
+# and results will be aggregated to provide mean ± std metrics
+# This is particularly useful for:
+#   - Evaluating model stability across different random initializations
+#   - Obtaining more reliable performance estimates with confidence intervals
+#   - Reducing the impact of random seed selection on model performance
+# Note: If provided, this overrides the single seed parameter
+# Options: List of integers (recommended: 3-5 different seeds for robustness)
+# Examples:
+#   seeds: [42, 123, 2025]      # Multiple seeds for robustness testing
+#   seeds: [42]                  # Single seed (equivalent to seed: 42)
+#   seeds: []                    # Use default single seed (seed: 42)
+seeds: [42, 123, 2025]
+
+# Method for splitting data into train/validation/test sets
+# Options:
+#   - "scaffold": Bemis-Murcko scaffold-based split (recommended for drug discovery)
+#                 Ensures test set contains different molecular scaffolds from training
+#   - "stratified": Stratified split maintaining class proportions (for classification)
+#   - "random": Random split (for baseline comparisons)
+split_method: "scaffold"
+
+# Method for K-Fold Cross-Validation splitting (when folds > 1)
+# Note: This is independent of split_method, which controls the Stage 1 external test split
+# Options:
+#   - "scaffold": Improved greedy ScaffoldKFold (recommended, ensures no empty folds and balanced samples)
+#                 Scaffolds are distributed across folds using a greedy strategy to balance sample counts
+#   - "random": Standard random stratified split (classification: StratifiedKFold, regression: KFold)
+#               Does not guarantee scaffold independence, but may be useful for small datasets
+cv_split_method: "scaffold"
+
+# Metric for selecting best model on external test set (when folds > 1)
+# Classification options:
+#   - "AUC": Area Under ROC Curve
+#   - "PR_AUC": Area Under Precision-Recall Curve
+#   - "ACC": Accuracy
+#   - "F1": F1 Score
+#   - "MCC": Matthews Correlation Coefficient (default for classification)
+# Regression options:
+#   - "R2": Coefficient of Determination (default for regression)
+#   - "RMSE": Root Mean Squared Error
+#   - "MAE": Mean Absolute Error
+external_test_metric: "MCC"
+
+# ------------------------------------------------------------------------------
+# Model Selection
+# ------------------------------------------------------------------------------
+
+# List of models to train (comma-separated in YAML list format)
+# Leave empty to train all available models
+
+# Classification Models:
+#   Traditional ML:
+#     - "LR": Logistic Regression
+#     - "RFC": Random Forest Classifier
+#     - "SVC": Support Vector Classifier
+#     - "XGBC": XGBoost Classifier
+#     - "LGBMC": LightGBM Classifier
+#     - "ETC": Extra Trees Classifier
+#   Deep Learning:
+#     - "MLP": Multi-Layer Perceptron
+#     - "GAT": Graph Attention Network (requires PyTorch Geometric and RDKit)
+#     - "ChemBERTa": ChemBERTa Transformer (requires Transformers)
+
+# Regression Models:
+#   Traditional ML:
+#     - "Ridge": Ridge Regression
+#     - "RFR": Random Forest Regressor
+#     - "ETR": Extra Trees Regressor
+#   Deep Learning:
+#     - "MLP": Multi-Layer Perceptron
+#     - "GAT": Graph Attention Network (requires PyTorch Geometric and RDKit)
+#     - "ChemBERTa": ChemBERTa Transformer (requires Transformers)
+
+# Examples:
+#   selected_models: ["XGBC", "RFC", "MLP"]           # Traditional + MLP
+#   selected_models: ["MLP", "GAT", "ChemBERTa"]      # Deep learning only
+#   selected_models: ["LR","RFC","SVC","XGBC","ETC"]   # Traditional only
+#   selected_models: []                               # Train all available models
+selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
+
+# ------------------------------------------------------------------------------
+# Output Configuration
+# ------------------------------------------------------------------------------
+
+# Directory path for saving results and models
+# All output files will be saved here
+output_dir: "./Output/test_output"
+
+# ------------------------------------------------------------------------------
+# Feature Processing Configuration
+# ------------------------------------------------------------------------------
+
+# Variance threshold for filtering low-variance features
+# Features with variance below this threshold will be removed
+# Options: 0.0 (no filtering) to 1.0 (recommended: 0.01)
+variance_threshold: 0.01
+
+# Minimum frequency for filtering binary fingerprint features
+# For binary fingerprints (values 0/1), removes features that appear in less
+# than this percentage of samples. This is useful for filtering rare bits
+# that may carry little information while preserving potentially important ones.
+# Options: 0.0 (no filtering) to 0.1 (recommended: 0.05 for 5%)
+# Note: Only applied when features are binary (0/1)
+min_frequency: 0.05
+
+# ------------------------------------------------------------------------------
+# Automatic Fingerprint Generation
+# ------------------------------------------------------------------------------
+
+# Automatically generate molecular fingerprints if not present in input data
+# Options:
+#   - true: Generate fingerprints automatically (recommended)
+#   - false: Require fingerprints to be pre-generated
+auto_generate_fingerprints: true
+
+# Types of fingerprints to generate (comma-separated in YAML list format)
+# Options:
+#   - "morgan": Morgan fingerprints (radius=2, nBits=2048) - recommended
+#   - "maccs": MACCS keys (166 bits)
+#   - "rdkit": RDKit fingerprints (2048 bits)
+#   - "atompair": Atom Pair fingerprints (2048 bits)
+#   - "torsion": Topological Torsion fingerprints (2048 bits)
+# Examples:
+#   fingerprint_types: ["morgan"]                      # Morgan only
+#   fingerprint_types: ["morgan", "maccs"]             # Morgan + MACCS
+#   fingerprint_types: ["morgan", "rdkit", "maccs"]    # Multiple types
+fingerprint_types: ["morgan"]
+
+# ------------------------------------------------------------------------------
+# Deep Learning Hyperparameters
+# ------------------------------------------------------------------------------
+
+# Maximum number of training epochs for deep learning models
+# Options: 10 to 500 (recommended: 50-200)
+max_epochs: 10
+
+# Batch size for training deep learning models
+# Options: 16, 32, 64, 128 (recommended: 32 for most cases)
+# Larger batches may require more GPU memory
+batch_size: 16
+
+# Learning rate for deep learning model optimization
+# Options: 0.0001 to 0.01 (recommended: 0.001)
+# Lower values may converge slower but more stable
+learning_rate: 0.001
+
+# Early stopping patience (number of epochs to wait before stopping)
+# Training stops if validation loss doesn't improve for this many epochs
+# Options: 5 to 20 (recommended: 10)
+early_stopping_patience: 5
+
+# ------------------------------------------------------------------------------
+# Early Enrichment Factor Configuration
+# ------------------------------------------------------------------------------
+
+# Percentile for Early Enrichment Factor calculation
+# EF% measures the enrichment of active compounds in the top percentile
+# Options: 0.1 to 10.0 (recommended: 1.0 for EF1%)
+# Examples:
+#   - 0.1: EF0.1% (top 0.1%)
+#   - 1.0: EF1% (top 1%) - recommended
+#   - 5.0: EF5% (top 5%)
+#   - 10.0: EF10% (top 10%)
+ef_percentile: 1.0
+
+# ------------------------------------------------------------------------------
+# SHAP Analysis Configuration
+# ------------------------------------------------------------------------------
+
+# Enable SHAP (SHapley Additive exPlanations) analysis for model interpretability
+# SHAP provides feature importance and contribution analysis
+# Note: Only available in single split mode (folds: 1)
+# Options:
+#   - true: Run SHAP analysis on best models
+#   - false: Skip SHAP analysis
+run_shap: false
+
+# Maximum number of features to display in SHAP plots
+# Options: 5 to 50 (recommended: 20)
+shap_max_display: 20
+
+# Sample size for SHAP computation (to speed up analysis)
+# Larger values provide more accurate results but are slower
+# Options: 100 to 1000 (recommended: 500)
+shap_sample_size: 500
+
+# ------------------------------------------------------------------------------
+# Multi-Modal Fusion Configuration (Experimental)
+# ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Hyperparameter Tuning Configuration (Experimental)
+# ------------------------------------------------------------------------------'''
+# ------------------------------------------------------------------------------
+# Hyperparameter Tuning Configuration (Experimental)
+# ------------------------------------------------------------------------------
+
+# Enable hyperparameter tuning for selected models
+# Note: This will significantly increase training time
+# This Stage2 tuning is performed on the Development Set only (never touches
+# the External Test Set). For sklearn models only (models with `grid` in registry).
+# Options:
+#   - true: Perform hyperparameter tuning
+#   - false: Use default hyperparameters (recommended)
+tune: false
+
+# Whether to run Stage 2 (K-Fold CV on Development Set).
+# Even if Stage 2 is disabled, the script still does:
+#  Stage 1 (Dev/External split) + Stage 3 (train on full Dev, evaluate on External Test).
+run_cv_stage2: true
+
+# Hyperparameter search mode for Stage2 tuning.
+# Options:
+#   - grid: enumerate all grid combinations (can be expensive)
+#   - random: sample candidates from the grid space
+tune_mode: "grid"
+
+# Metric used to rank hyperparameter candidates during Stage2 tuning.
+# If omitted (or null/empty), it falls back to `external_test_metric`.
+# For classification tasks: e.g., MCC (recommended)
+# For regression tasks: e.g., R2 (recommended)
+cv_tune_metric: "MCC"
+
+# Number of iterations for hyperparameter tuning
+# Only used if tune is true
+# Options: 10 to 100 (recommended: 25)
+tune_iter: 25
+
+# ------------------------------------------------------------------------------
+# Ensemble Configuration (Experimental)
+# ------------------------------------------------------------------------------
+
+# Enable ensemble of top-performing models
+# Note: This feature is under development
+# Options:
+#   - true: Create ensemble of top models
+#   - false: Do not create ensemble (default)
+create_ensemble: false
+
+# Number of top models to include in ensemble
+# Only used if create_ensemble is true
+# Options: 3 to 10 (recommended: 3)
+ensemble_n_top: 3
+
+# ------------------------------------------------------------------------------
+# Parallel Processing Configuration
+# ------------------------------------------------------------------------------
+
+# Number of parallel jobs for model training
+# Options:
+#   - -1: Use all available CPU cores (recommended)
+#   - 1: Single-threaded (for debugging)
+#   - 2, 4, 8: Specific number of cores
+n_jobs: -1
+
+# ------------------------------------------------------------------------------
+# Additional Notes
+# ------------------------------------------------------------------------------
+
+# 1. For classification tasks, ensure the label column contains binary values (0/1)
+# 2. For regression tasks, ensure the pic50 column contains numeric values
+# 3. Scaffold-based splitting requires valid SMILES strings
+# 4. GAT and ChemBERTa models require additional dependencies:
+#    - GAT: torch-geometric, rdkit
+#    - ChemBERTa: transformers
+# 5. Two-stage validation (folds > 1) provides more reliable model evaluation
+# 6. Model saving and SHAP analysis are only available in single split mode (folds: 1)
+# 7. Use the --log-level parameter to control logging verbosity (DEBUG/INFO/WARNING/ERROR)
+# 8. SMILES validation is automatically performed on load; invalid entries will be logged
+# 9. Library versions are automatically checked for compatibility on startup
+# 10. For binary fingerprints, use min_frequency to filter out rare feature bits
+# 11. cv_split_method controls K-Fold CV splitting method (scaffold/random), independent of split_method
+#     - Use "scaffold" (default) for rigorous scaffold-based CV with greedy allocation
+#     - Use "random" for small datasets where scaffold-based splitting may not work well
+# 12. Improved ScaffoldKFold uses greedy allocation to prevent empty folds and balance sample counts across folds
+# 13. Multi-seed training (seeds parameter) enables robustness testing across different random initializations
+#     - Each model is trained multiple times with different seeds
+#     - Results are aggregated to provide mean ± std metrics
+#     - Particularly useful for deep learning models which are sensitive to random initialization
+#     - In single split mode, models are saved with seed ID in filename (e.g., model_single_seed42.pt)
+#     - In K-Fold CV mode, models are not saved to avoid excessive storage usage
+#     - GPU memory is automatically cleared after each seed training to prevent OOM errors
+#     - Training time scales linearly with the number of seeds (recommended: 3-5 seeds)
+# 14. When using multiple seeds, results include individual seed metrics and aggregated mean ± std values
+#     - Aggregated metrics are named {metric}_mean and {metric}_std
+#     - This provides confidence intervals for performance estimates
+#     - Helps assess model stability and reproducibility
