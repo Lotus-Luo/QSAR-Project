@@ -28,6 +28,5 @@ _smoke_out_regression_nan_alignment/
 _smoke_out_regression_nan_alignment/
 
 # 排除待上传的脚本
-Script/
-smoke_test_qsar_modeling_pytorch.py
-qsar_modeling_compact.py
+Script/smoke_test_qsar_modeling_pytorch.py
+Script/qsar_modeling_compact.py
