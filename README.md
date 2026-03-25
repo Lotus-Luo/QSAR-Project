@@ -378,6 +378,28 @@ Aggregating results for XGBC across 3 seeds
   Val MCC: 0.6234 ± 0.0189
 ```
 
+## Visualization & Post-Hoc Plots (Scripts/visualize.py)
+
+Use `Scripts/visualize.py` (or `aggregate_split_predictions.py` in the repo root) to turn the per-run outputs into publication-ready visuals. The script assumes you already ran `qsar_modeling_pytorch.py` with `split_seeds`; it reads both `predictions/external_test_predictions_seed_*.csv` and `results/cv_predictions_fold_*.csv`, then saves the figures inside `<BASE_DIR>/figures/` (default `--output-dir`).
+
+Key options:
+* `--include-external` / `--include-cv`: enable ROC/PR curves for the external test set or the CV folds (or both).
+* `--boxplot-stage`: choose `external`, `cv`, or `both` for the 3×2 metric boxplots (default metrics: MCC, F1, ACC, AUC, PR_AUC, EF5%).
+* `--palette` (colorblind/deep), `--dpi` (e.g., 600), and `--metrics` allow you to tailor the styling and metrics.
+
+Example:
+```bash
+python Scripts/visualize.py \
+  --base-dir models_out/classification_20260325_141059 \
+  --include-external \
+  --include-cv \
+  --boxplot-stage both
+```
+
+This produces `external_roc_pr.svg`, `cv_roc_pr.svg`, `external_metric_boxplots.svg`, and `cv_metric_boxplots.svg` inside `models_out/.../figures/`, all following the Times New Roman + Nature/Science style you asked for.
+
+## Available Models
+
 ## Available Models
 
 ### Classification Tasks
@@ -763,10 +785,10 @@ tail -f models_out/classification_*/logs/qsar_run_*.log
 If you use this code, please cite:
 
 ```bibtex
-@article{waqas2025,
-  title={Structural and Dynamic Profiling of SARS-CoV-2 Papain-Like Protease Bound to Machine-Learning-Identified Oxadiazole Inhibitors},
-  author={Waqas, Muhammad},
-  year={2025}
+@article{???,
+  title={???},
+  author={???},
+  year={???}
 }
 ```
 
@@ -776,4 +798,4 @@ This code is for academic and research use only. Modification, redistribution, o
 
 ## Contact
 
-For questions or suggestions, please contact Muhammad Waqas.
+For questions or suggestions, please contact Toby Lo.
