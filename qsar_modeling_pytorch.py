@@ -212,6 +212,7 @@ class QSARConfig:
     # Even when disabled, Stage 1 (Dev/External Test split) and Stage 3 (final external evaluation)
     # still run, so the Dev/External split remains leakage-safe.
     run_cv_stage2: bool = True
+    save_cv_details: bool = False  # Save per-fold/seed artifacts for SHAP and diagnostics during CV
 
     # Whether to use Stage 2 CV results for hyperparameter tuning.
     # Tuning is performed only on the Development Set and never touches the External Test Set.
@@ -240,6 +241,7 @@ class QSARConfig:
     learning_rate: float = 0.001
     early_stopping_patience: int = 10
     config_file: str = ""
+    split_seeds: List[int] = field(default_factory=lambda: [42])
     
     # Early enrichment settings
     ef_percentile: float = 1.0  # EF1%
@@ -388,7 +390,7 @@ def calculate_ad(X_train: np.ndarray, X_test: np.ndarray, method: str = "leverag
     return in_ad
 
 # --------- Enhanced Metrics ---------
-def calculate_metrics(y_true: np.ndarray, y_ pred: np.ndarray, y_proba: np.ndarray, 
+def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray, 
                      task: str = "classification", ef_percentile: float = 1.0) -> Dict[str, float]:
     """
     Calculate comprehensive metrics including MCC, PR-AUC, and Early Enrichment
@@ -910,19 +912,43 @@ def scaffold_split(smiles_list: List[str], y: np.ndarray, test_size: float = 0.2
 # --------- PyTorch Deep Learning Models ---------
 class ResidualBlock(nn.Module):
     """Residual block with configurable activation and AlphaDropout regularization."""
-    def __init__(self, in_dim: int, out_dim: int, activation: str = "mish", dropout: float = 0.3, use_residual: bool = True):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        activation: str = "mish",
+        dropout: float = 0.3,
+        use_residual: bool = True,
+        norm_type: str = "layernorm",
+    ):
         super(ResidualBlock, self).__init__()
         self.activation = activation.lower()
         self.use_residual = use_residual
         self.linear = nn.Linear(in_dim, out_dim)
-        self.norm = nn.BatchNorm1d(out_dim)
+        self.norm_type = norm_type.lower()
+        if self.norm_type == "batchnorm":
+            self.norm = nn.BatchNorm1d(out_dim)
+        else:
+            self.norm = nn.LayerNorm(out_dim)
         self.dropout = nn.AlphaDropout(dropout) if dropout and dropout > 0.0 else nn.Identity()
         self.shortcut = nn.Identity() if in_dim == out_dim else nn.Linear(in_dim, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         out = self.linear(x)
-        out = self.norm(out)
+        if self.norm_type == "batchnorm" and self.training and out.size(0) < 2:
+            out = F.batch_norm(
+                out,
+                self.norm.running_mean,
+                self.norm.running_var,
+                self.norm.weight,
+                self.norm.bias,
+                training=False,
+                momentum=self.norm.momentum,
+                eps=self.norm.eps,
+            )
+        else:
+            out = self.norm(out)
         out = self._activate(out)
         out = self.dropout(out)
         if self.use_residual:
@@ -939,20 +965,30 @@ class ResidualBlock(nn.Module):
 
 class ResidualMLP(nn.Module):
     """Generalized MLP backbone using configurable residual blocks."""
-    def __init__(self,
-                 input_dim: int,
-                 hidden_dims: Optional[List[int]] = None,
-                 output_dim: int = 1,
-                 activation: str = "mish",
-                 dropout: float = 0.3,
-                 use_residual: bool = True):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Optional[List[int]] = None,
+        output_dim: int = 1,
+        activation: str = "mish",
+        dropout: float = 0.3,
+        use_residual: bool = True,
+        norm_type: str = "layernorm",
+    ):
         super(ResidualMLP, self).__init__()
         if hidden_dims is None:
             hidden_dims = [512, 256]
 
         dims = [input_dim] + hidden_dims
         self.blocks = nn.ModuleList([
-            ResidualBlock(in_dim, out_dim, activation=activation, dropout=dropout, use_residual=use_residual)
+            ResidualBlock(
+                in_dim,
+                out_dim,
+                activation=activation,
+                dropout=dropout,
+                use_residual=use_residual,
+                norm_type=norm_type,
+            )
             for in_dim, out_dim in zip(dims[:-1], dims[1:])
         ])
         final_dim = dims[-1]
@@ -1097,8 +1133,7 @@ def smiles_to_graph(smiles: str, logger: Optional[logging.Logger] = None) -> Opt
         if mol is None:
             return None
         
-        # Add hydrogen atoms
-        mol = Chem.AddHs(mol)
+        mol = Chem.AddHs(mol) # Add hydrogen atoms
         
         # Generate 3D coordinates (optional, can be slow)
         # AllChem.EmbedMolecule(mol)
@@ -1213,9 +1248,9 @@ try:
         ChemBERTa Transformer for molecular property prediction using AutoModelForSequenceClassification.
         
         Features:
-        - Local-first loading logic:优先从本地路径加载模型
-        - Full fine-tuning support: 支持全参数微调
-        - GPU/CPU fallback: 自动适配GPU运行,无GPU时回退至CPU
+        - Local-first loading strategy: Prioritizes loading locally.
+        - Full fine-tuning support: Support full parameter fine-tuning
+        - GPU/CPU fallback: Automatically adapts to GPU operation and falls back to CPU when there is no GPU
         
         Args:
             model_name: Hugging Face model name or local path. Default: 'DeepChem/ChemBERTa-77M-MTR'
@@ -1292,7 +1327,6 @@ except ImportError:
     print("Warning: Transformers library not available. ChemBERTa model will be disabled.")
 
 class ChemBERTaDataset(Dataset):
-    """Dataset for ChemBERTa"""
     def __init__(self, smiles_list, labels, tokenizer, max_length=128, logger=None):
         self.smiles_list = smiles_list
         self.labels = labels
@@ -1451,7 +1485,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         registry['RFC'] = {
             'type': 'sklearn',
             'model': RandomForestClassifier,
-            'params': {'n_estimators': 400, 'n_jobs': -1},
+            'params': {'n_estimators': 400, 'n_jobs': -1, 'bootstrap': True},
             'grid': {'n_estimators': [300, 500, 800], 'max_depth': [None, 20, 40]}
         }
         
@@ -1470,7 +1504,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
                 'type': 'sklearn',
                 'model': XGBClassifier,
                 # Explicit keys (None values will be overwritten by train_model_wrapper using the active seed).
-                'params': {'random_state': None, 'seed': None},
+                'params': {'random_state': None, 'seed': None, 'subsample': 0.8},
                 'grid': {'n_estimators': [300, 600, 1000], 'max_depth': [3, 6, 9], 'learning_rate': [0.03, 0.1]}
             }
         except ImportError:
@@ -1482,7 +1516,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
             registry['LGBMC'] = {
                 'type': 'sklearn',
                 'model': LGBMClassifier,
-                'params': {},
+                'params': {'subsample': 0.8},
                 'grid': {'n_estimators': [400, 800, 1200], 'num_leaves': [31, 63, 127], 'learning_rate': [0.03, 0.1]}
             }
         except ImportError:
@@ -1532,7 +1566,8 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
             'dropout': 0.3,
             'activation': 'mish',
             'use_residual': True,
-            'output_dim': 1
+            'output_dim': 1,
+            'norm_type': 'layernorm'
         }
     }
     
@@ -1595,19 +1630,24 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     # For ChemBERTa transformer models, use specialized hyperparameters and optimizer
     if model_type == "transformer":
         # AdamW optimizer with weight decay (standard for transformer fine-tuning)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+        base_lr = 5e-5
+        wt_decay = 0.01
+        min_lr = 1e-7
+        optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=wt_decay)
         
         # Cosine Annealing Learning Rate scheduler
         # Gradually reduces learning rate following a cosine curve
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, 
             T_max=config.max_epochs,  # Number of iterations for the cosine cycle
-            eta_min=1e-7  # Minimum learning rate
+            eta_min=min_lr  # Minimum learning rate
         )
         
         logger.info("ChemBERTa training strategy:")
-        logger.info("  - Optimizer: AdamW (lr=5e-5, weight_decay=0.01)")
-        logger.info("  - Scheduler: CosineAnnealingLR (T_max={}, eta_min=1e-7)".format(config.max_epochs))
+        current_lr = optimizer.param_groups[0]['lr']
+        current_wd = optimizer.param_groups[0]['weight_decay']
+        logger.info(f"  - Optimizer: {type(optimizer).__name__} (lr={current_lr:.1e}, weight_decay={current_wd})")
+        logger.info(f"  - Scheduler: {type(scheduler).__name__} (T_max={scheduler.T_max}, eta_min={scheduler.eta_min:.1e})")
         logger.info("  - Fine-tuning: Full parameter fine-tuning (no frozen layers)")
     else:
         # Default strategy for other deep learning models (MLP, GAT)
@@ -1848,7 +1888,7 @@ def predict_pytorch_model(model, data_loader, task: str = "classification") -> T
     if task == "classification":
         # Apply sigmoid to get probabilities (model now outputs logits)
         all_proba = torch.sigmoid(torch.tensor(all_preds)).numpy()
-        all_labels = (all_proba >= 0.5).astype(int)
+        all_labels = (all_proba >= 0.5).astype(int) # threshold should be modifiable if needed
         return all_labels, all_proba
     else:
         all_labels = all_preds
@@ -1933,7 +1973,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             y_proba_train = model.decision_function(X_train)
             # Sigmoid for classification
             if task == "classification":
-                y_proba_train = 1.0 / (1.0 + np.exp(-y_proba_train))
+                y_proba_train = 1.0 / (1.0 + np.exp(-y_proba_train)) # sigmoid to convert to probabilities
         else:
             y_proba_train = model.predict(X_train)
         
@@ -2160,6 +2200,138 @@ def _save_feature_processors(selector, scaler, feature_mask, path: Path, logger:
         np.save(file_path, feature_mask)
         if logger:
             logger.info(f"  ✓ Saved feature mask: {file_path}")
+
+
+def _save_cv_fold_seed_details(root_dir: Path,
+                               fold_idx: Optional[int],
+                               seed: int,
+                               model_key: str,
+                               model_config: Dict[str, Any],
+                               model_type: str,
+                               model_obj,
+                               X_train_arr,
+                               scaler,
+                               selector,
+                               feature_mask: Optional[np.ndarray],
+                               y_train,
+                               smiles_train: Optional[List[str]],
+                               ids_train: Optional[List[str]],
+                               logger: logging.Logger = None):
+    """
+    Save per-fold per-seed artifacts required for post-hoc analysis.
+
+    Args:
+        root_dir: Root directory for CV artifacts
+        fold_idx: Fold identifier
+        seed: Random seed used for training
+        model_key: Model identifier
+        model_config: Registry entry for the model
+        model_type: Model type string (e.g., 'pytorch', 'sklearn')
+        model_obj: Trained model instance
+        X_train_arr: Processed training matrix
+        scaler: Fitted scaler (if any)
+        selector: Fitted selector (if any)
+        feature_mask: Boolean mask for features
+        y_train: Training labels
+        smiles_train: SMILES strings for training samples
+        ids_train: Molecule IDs for training samples
+        logger: Optional logger
+    """
+    if root_dir is None or model_obj is None:
+        return
+
+    fold_label = f"fold_{fold_idx}" if fold_idx is not None else "fold_unknown"
+    seed_label = f"seed_{seed}"
+    seed_dir = Path(root_dir) / fold_label / seed_label
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save model artifact
+    model_path = seed_dir / f"model_{model_key}"
+    try:
+        if model_type in ['sklearn']:
+            _save_sklearn_model(model_obj, model_path)
+        else:
+            _save_pytorch_model(model_obj, model_path, model_type)
+    except Exception as exc:
+        if logger:
+            logger.warning(f"    ✗ Failed to save CV model artifact: {exc}")
+    else:
+        if logger:
+            logger.info(f"    ✓ Saved CV model artifact: {model_path}")
+
+    # Save processed training data
+    if X_train_arr is not None:
+        try:
+            X_array = np.asarray(X_train_arr)
+            np.save(seed_dir / "X_train_processed.npy", X_array)
+            if logger:
+                logger.info(f"    ✓ Saved processed training data: {seed_dir / 'X_train_processed.npy'}")
+        except Exception as exc:
+            if logger:
+                logger.warning(f"    ✗ Failed to save X_train_processed: {exc}")
+
+    # Save metadata for SHAP traceability
+    try:
+        metadata = {'y_train': np.asarray(y_train).tolist()}
+        if smiles_train is not None:
+            metadata['smiles'] = list(smiles_train)
+        if ids_train is not None:
+            metadata['id'] = list(ids_train)
+        metadata_df = pd.DataFrame(metadata)
+        metadata_path = seed_dir / "metadata.csv"
+        metadata_df.to_csv(metadata_path, index=False)
+        if logger:
+            logger.info(f"    ✓ Saved metadata: {metadata_path}")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"    ✗ Failed to save metadata: {exc}")
+
+    # Save processors
+    try:
+        import joblib
+        if scaler is not None:
+            joblib.dump(scaler, seed_dir / "scaler.joblib")
+            if logger:
+                logger.info(f"    ✓ Saved scaler: {seed_dir / 'scaler.joblib'}")
+        if selector is not None:
+            joblib.dump(selector, seed_dir / "selector.joblib")
+            if logger:
+                logger.info(f"    ✓ Saved selector: {seed_dir / 'selector.joblib'}")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"    ✗ Failed to save processor: {exc}")
+
+    # Save feature mask for this fold if available
+    if feature_mask is not None:
+        try:
+            np.save(seed_dir / "feature_mask.npy", feature_mask)
+            if logger:
+                logger.info(f"    ✓ Saved feature mask: {seed_dir / 'feature_mask.npy'}")
+        except Exception as exc:
+            if logger:
+                logger.warning(f"    ✗ Failed to save feature mask: {exc}")
+
+    # Save PyTorch model configuration for reconstruction
+    if model_type == 'pytorch':
+        try:
+            params = dict(model_config.get('params', {})) if model_config else {}
+            if X_train_arr is not None:
+                params['input_dim'] = int(np.asarray(X_train_arr).shape[1])
+            config_snapshot = {
+                'model_key': model_key,
+                'model_type': model_type,
+                'fold': fold_idx,
+                'seed': seed,
+                'params': params
+            }
+            config_path = seed_dir / "model_config.json"
+            with open(config_path, "w") as f:
+                json.dump(config_snapshot, f, indent=2)
+            if logger:
+                logger.info(f"    ✓ Saved PyTorch config: {config_path}")
+        except Exception as exc:
+            if logger:
+                logger.warning(f"    ✗ Failed to save PyTorch config: {exc}")
 
 # --------- SHAP Analysis ---------
 def run_shap_analysis(model_path: Path, X_train: pd.DataFrame, X_val: pd.DataFrame,
@@ -2523,6 +2695,10 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                      fold_idx: Optional[int] = None,
                      save_models: bool = False,
                      model_save_dir: Optional[Path] = None,
+                     global_feature_mask: Optional[np.ndarray] = None,
+                     save_cv_details: bool = False,
+                     cv_save_root: Optional[Path] = None,
+                     cv_prediction_accumulator: Optional[List[pd.DataFrame]] = None,
                      logger: logging.Logger = None) -> List[Dict[str, Any]]:
     """
     Train models on a single train/validation split with multi-seed support
@@ -2541,6 +2717,9 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
         fold_idx: Fold index (for k-fold CV)
         save_models: Whether to save models for each seed
         model_save_dir: Directory to save models
+        global_feature_mask: Optional mask describing the active features for this fold
+        save_cv_details: Whether to persist CV artifacts (models, data, processors)
+        cv_save_root: Root directory for per-fold/seed artifacts
         logger: Logger instance
     
     Returns:
@@ -2566,6 +2745,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
     #   and (b) risk inconsistent feature counts across folds.
     # - In single-split mode, there is no global feature mask yet, so we apply filtering
     #   inside the fold to avoid leakage.
+    fold_selector = None
     if X_train is not None and X_val is not None:
         if config.folds > 1:
             logger.info(f"{fold_prefix}Skipping fold-level feature filtering (global filtering already applied)")
@@ -2574,7 +2754,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
             feature_mask = None
         else:
             logger.info(f"{fold_prefix}Applying fold-level feature filtering (no standardization yet)...")
-            X_train_processed, X_val_processed, feature_mask, _, _, _ = apply_feature_processing(
+            X_train_processed, X_val_processed, feature_mask, fold_selector, _, _ = apply_feature_processing(
                 X_train, X_val, config, logger, model_type='none'  # No standardization
             )
     else:
@@ -2588,6 +2768,10 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
     
     for model_key in valid_models:
         model_config = registry[model_key]
+        scaler = None
+        selector = fold_selector
+        X_train_final = X_train_processed
+        X_val_final = X_val_processed
         
         # Determine if this is a traditional or deep learning model
         model_type_category = 'deep_learning' if model_config['type'] in ['pytorch', 'pytorch_geometric', 'transformer'] else 'traditional'
@@ -2640,6 +2824,8 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
             
             # Set random seed for reproducibility
             set_all_seeds(seed, logger)
+            valid_indices_val = None
+            valid_indices_train = None
             
             # Prepare data based on model type
             if model_config['type'] in ['pytorch_geometric', 'transformer']:
@@ -2697,10 +2883,18 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                 valid_indices_val = result.get('valid_indices_val', None)
                 valid_indices_train = result.get('valid_indices_train', None)
 
-                if valid_indices_val is not None:
-                    y_val_for_metrics = y_val[valid_indices_val]
-                if valid_indices_train is not None:
-                    y_train_for_metrics = y_train[valid_indices_train]
+            if valid_indices_val is not None:
+                y_val_for_metrics = y_val[valid_indices_val]
+            if valid_indices_train is not None:
+                y_train_for_metrics = y_train[valid_indices_train]
+
+            ids_val_for_metrics = ids_val
+            smiles_val_for_metrics = smiles_val
+            if valid_indices_val is not None:
+                if ids_val is not None:
+                    ids_val_for_metrics = [ids_val[i] for i in valid_indices_val]
+                if smiles_val is not None:
+                    smiles_val_for_metrics = [smiles_val[i] for i in valid_indices_val]
 
             val_metrics = calculate_metrics(
                 y_val_for_metrics, result['y_pred_val'], result['y_proba_val'],
@@ -2711,6 +2905,24 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                 y_train_for_metrics, result['y_pred_train'], result['y_proba_train'],
                 config.task, config.ef_percentile
             )
+
+            # Record CV predictions for the fold (needed for predictions export)
+            if cv_prediction_accumulator is not None and result.get('y_proba_val') is not None:
+                y_scores = np.asarray(result['y_proba_val'])
+                y_trues = np.asarray(y_val_for_metrics)
+                rows = []
+                for idx in range(len(y_scores)):
+                    rows.append({
+                        'model': model_key,
+                        'seed': seed,
+                        'fold': fold_idx,
+                        'molecule_id': ids_val_for_metrics[idx] if ids_val_for_metrics is not None else None,
+                        'smiles': smiles_val_for_metrics[idx] if smiles_val_for_metrics is not None else None,
+                        'true_label': float(y_trues[idx]),
+                        'predicted_probability': float(y_scores[idx])
+                    })
+                if rows:
+                    cv_prediction_accumulator.append(pd.DataFrame(rows))
             
             # Store seed-specific results
             seed_result_dict = {
@@ -2722,6 +2934,27 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                 **{f'{k}_train': v for k, v in train_metrics.items()}
             }
             seed_results.append(seed_result_dict)
+            
+            if save_cv_details and cv_save_root is not None and 'model' in result:
+                X_data_for_saving = X_train_final if X_train_final is not None else X_train_processed
+                mask_to_save = feature_mask if feature_mask is not None else global_feature_mask
+                _save_cv_fold_seed_details(
+                    cv_save_root,
+                    fold_idx,
+                    seed,
+                    model_key,
+                    model_config,
+                    model_config.get('type', 'sklearn'),
+                    result['model'],
+                    X_data_for_saving,
+                    scaler,
+                    selector,
+                    mask_to_save,
+                    y_train,
+                    smiles_train,
+                    ids_train,
+                    logger=logger
+                )
             
             # GPU memory management: clear cache after training each seed for deep learning models
             if model_type_category == 'deep_learning' and torch.cuda.is_available():
@@ -2784,7 +3017,8 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
 def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray, 
                  feature_df: pd.DataFrame, smiles_list: Optional[List[str]] = None,
                  ids: Optional[List[str]] = None,
-                 logger: logging.Logger = None):
+                 logger: logging.Logger = None,
+                 split_seed: Optional[int] = None):
     """
     Main training pipeline
     
@@ -2796,18 +3030,29 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         smiles_list: SMILES strings (for GAT/ChemBERTa)
         ids: Molecule IDs
         logger: Logger instance
+        split_seed: Seed used for Stage 1/2 splits (overrides ``config.seed`` when provided)
     """
     if logger is None:
         logger = logging.getLogger(__name__)
     
+    stage_seed = split_seed if split_seed is not None else config.seed
+    logger.info(f"Split seed in use: {stage_seed}")
+
     from sklearn.model_selection import StratifiedKFold, KFold
     from sklearn.model_selection import train_test_split
     
+    result_payload = {
+        'external_summary': None,
+        'cv_summary': None,
+        'external_rows': None,
+        'cv_rows': None
+    }
+
     # Setup output directory (already created in main_cli)
     out_dir = Path(config.output_dir)
     
     # Create subdirectories for organized output structure
-    subdirs = ['logs', 'results', 'models', 'feature_processors', 'predictions']
+    subdirs = ['results', 'models', 'feature_processors', 'predictions']
     for subdir in subdirs:
         (out_dir / subdir).mkdir(exist_ok=True)
     
@@ -2872,7 +3117,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 logger.error("SMILES data required for scaffold split!")
                 return
             logger.info(f"Splitting data: {int((1 - config.test_size) * 100)}% Development Set, {int(config.test_size * 100)}% External Test Set")
-            dev_indices, ext_test_indices = scaffold_split(smiles_list, y, config.test_size, config.seed)
+            dev_indices, ext_test_indices = scaffold_split(smiles_list, y, config.test_size, stage_seed)
             
             # Count unique scaffolds
             dev_scaffolds = set([get_scaffold(smiles_list[i]) for i in dev_indices])
@@ -2887,14 +3132,14 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 dev_indices, ext_test_indices = train_test_split(
                     np.arange(len(y)), y, 
                     test_size=config.test_size, 
-                    random_state=config.seed, 
+                    random_state=stage_seed, 
                     stratify=y
                 )
             else:
                 dev_indices, ext_test_indices = train_test_split(
                     np.arange(len(y)), 
                     test_size=config.test_size, 
-                    random_state=config.seed
+                    random_state=stage_seed
                 )
             logger.info(f"Development Set: {len(dev_indices)} samples")
             logger.info(f"External Test Set: {len(ext_test_indices)} samples")
@@ -2903,7 +3148,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             dev_indices, ext_test_indices = train_test_split(
                 np.arange(len(y)), 
                 test_size=config.test_size, 
-                random_state=config.seed
+                random_state=stage_seed
             )
             logger.info(f"Development Set: {len(dev_indices)} samples")
             logger.info(f"External Test Set: {len(ext_test_indices)} samples")
@@ -2937,17 +3182,23 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             # Stage 2: K-Fold Cross-Validation on Development Set
             logger.info(f"\n--- Stage 2: K-Fold Cross-Validation on Development Set ---")
             logger.info(f"Using {config.folds}-fold CV on Development Set ({len(y_dev)} samples)")
+            cv_data_dir = out_dir / "cv_data"
+            if config.save_cv_details:
+                cv_data_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Detailed CV artifacts will be saved to: {cv_data_dir}")
+            else:
+                cv_data_dir = None
 
             if config.cv_split_method == "scaffold":
                 logger.info("Using ScaffoldKFold: scaffolds are distributed across folds with greedy allocation")
-                kfold = ScaffoldKFold(n_splits=config.folds, shuffle=True, random_state=config.seed)
+                kfold = ScaffoldKFold(n_splits=config.folds, shuffle=True, random_state=stage_seed)
             else:  # random
                 # Create k-fold splitter
                 logger.info("Using standard KFold/StratifiedKFold for cross-validation")
                 if config.task == "classification":
-                    kfold = StratifiedKFold(n_splits=config.folds, shuffle=True, random_state=config.seed)
+                    kfold = StratifiedKFold(n_splits=config.folds, shuffle=True, random_state=stage_seed)
                 else:
-                    kfold = KFold(n_splits=config.folds, shuffle=True, random_state=config.seed)
+                    kfold = KFold(n_splits=config.folds, shuffle=True, random_state=stage_seed)
 
             # Materialize folds once so Stage 2 tuning (optional) and Stage 2 training
             # use exactly the same split definitions.
@@ -2993,7 +3244,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                         candidates = [dict(zip(param_names, c)) for c in combos]
                     else:
                         # Randomly sample candidates.
-                        rng = np.random.default_rng(config.seed)
+                        rng = np.random.default_rng(stage_seed)
                         candidates = []
                         for _ in range(int(config.tune_iter)):
                             cand = {p: rng.choice(grid[p]) for p in param_names}
@@ -3047,6 +3298,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                                 registry=registry_candidate,
                                 fold_idx=fold_idx,
                                 save_models=False,
+                                global_feature_mask=dev_feature_mask,
                                 logger=logger,
                             )
 
@@ -3119,6 +3371,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                     ids_train, ids_val = None, None
 
                 # Train models on this fold
+                cv_prediction_frames = []
                 fold_results = train_single_fold(
                     config=config,
                     X_train=X_train, y_train=y_train,
@@ -3128,8 +3381,17 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                     registry=registry,
                     fold_idx=fold_idx,
                     save_models=False,
+                    global_feature_mask=dev_feature_mask,
+                    save_cv_details=config.save_cv_details,
+                    cv_save_root=cv_data_dir,
+                    cv_prediction_accumulator=cv_prediction_frames,
                     logger=logger
                 )
+                if cv_prediction_frames:
+                    cv_fold_preds = pd.concat(cv_prediction_frames, ignore_index=True, sort=False)
+                    cv_path = out_dir / "results" / f"cv_predictions_fold_{fold_idx}.csv"
+                    cv_fold_preds.to_csv(cv_path, index=False)
+                    logger.info(f"  ✓ Saved CV predictions for fold {fold_idx}: {cv_path}")
 
                 all_fold_results.extend(fold_results)
 
@@ -3234,8 +3496,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             # Save CV summary
             cv_summary_df = pd.DataFrame(cv_summary)
             cv_summary_df.to_csv(out_dir / "results" / "cv_summary.csv", index=False)
-
-            summary_df = cv_summary_df
+            result_payload['cv_summary'] = cv_summary_df
+            result_payload['cv_rows'] = fold_results_df
         
         # Stage 3: Evaluate ALL models on External Test Set
         logger.info(f"\n{'='*60}")
@@ -3526,6 +3788,29 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         # Save all predictions
         ext_test_predictions_df = pd.concat(all_ext_test_predictions, ignore_index=True)
         ext_test_predictions_df.to_csv(out_dir / "predictions" / "external_test_predictions.csv", index=False)
+
+        # Save label/predictions summary for visualization scripts
+        id_cols = ['id', 'smiles', 'true_label']
+        pivot = (
+            ext_test_predictions_df
+            .groupby(id_cols + ['model'], dropna=False)['predicted_probability']
+            .mean()
+            .reset_index()
+        )
+        pivot_wide = pivot.pivot_table(
+            index=id_cols,
+            columns='model',
+            values='predicted_probability'
+        ).reset_index()
+        pivot_wide.columns.name = None
+        score_cols = [c for c in pivot_wide.columns if c not in id_cols]
+        pivot_wide = pivot_wide.rename(columns={c: f"{c}_score" for c in score_cols})
+        labels_path = out_dir / "predictions" / f"external_test_predictions_seed_{split_seed}.csv"
+        pivot_wide['split_seed'] = split_seed
+        pivot_wide = pivot_wide[['id', 'smiles', 'true_label', 'split_seed'] + [c for c in pivot_wide.columns if c.endswith('_score')]]
+        pivot_wide.rename(columns={'id': 'molecule_id'}, inplace=True)
+        pivot_wide.to_csv(labels_path, index=False)
+        logger.info(f"  ✓ Saved per-seed predictions: {labels_path}")
         
         # Create summary with mean ± std across seeds
         summary_results = []
@@ -3547,6 +3832,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         # Save summary results
         summary_df = pd.DataFrame(summary_results)
         summary_df.to_csv(out_dir / "results" / "external_test_summary.csv", index=False)
+        result_payload['external_summary'] = summary_df
+        result_payload['external_rows'] = pd.DataFrame(all_ext_test_results)
         
         # Find best models based on external test set metric (use mean across seeds)
         logger.info(f"\n{'='*60}")
@@ -3721,7 +4008,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 return
             
             logger.info("Using scaffold-based split to ensure test set contains different molecular scaffolds")
-            train_indices, val_indices = scaffold_split(smiles_list, y, config.test_size, config.seed)
+            train_indices, val_indices = scaffold_split(smiles_list, y, config.test_size, stage_seed)
             
             # Apply split indices to all data
             y_train, y_val = y[train_indices], y[val_indices]
@@ -3746,10 +4033,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             logger.info("Using stratified split")
             if config.task == "classification":
                 train_indices, val_indices = train_test_split(np.arange(len(y)), test_size=config.test_size, 
-                                                             random_state=config.seed, stratify=y)
+                                                             random_state=stage_seed, stratify=y)
             else:
                 train_indices, val_indices = train_test_split(np.arange(len(y)), test_size=config.test_size, 
-                                                             random_state=config.seed)
+                                                             random_state=stage_seed)
             
             # Apply split to all data
             y_train, y_val = y[train_indices], y[val_indices]
@@ -3768,7 +4055,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             # Random split
             logger.info("Using random split")
             train_indices, val_indices = train_test_split(np.arange(len(y)), y, test_size=config.test_size, 
-                                                         random_state=config.seed)
+                                                         random_state=stage_seed)
             
             # Apply split to all data
             y_train, y_val = y[train_indices], y[val_indices]
@@ -3804,6 +4091,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         # Save results
         summary_df = pd.DataFrame(all_fold_results)
         summary_df.to_csv(out_dir / "results" / "summary_metrics.csv", index=False)
+        result_payload['cv_summary'] = summary_df
+        result_payload['cv_rows'] = pd.DataFrame(all_fold_results)
     
     logger.info(f"\n{'='*60}")
     logger.info("Training completed!")
@@ -3818,8 +4107,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info(f"Results saved to: {out_dir / 'results' / 'summary_metrics.csv'} (mean ± std across seeds)")
     logger.info(f"{'='*60}")
     
-    # Note: Model saving and SHAP analysis are not implemented for k-fold CV
-    # These features are designed for single split mode
+    # Note: Model saving and SHAP analysis are not implemented for k-fold CV unless
+    # `--save-cv-details` is set, which persists fold/seed artifacts under `cv_data/`.
     if not use_cv:
         # Find best models (separate for traditional and deep learning)
         # Check if results are already aggregated (contain _mean suffix)
@@ -3883,10 +4172,13 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         elif config.run_shap:
             logger.warning("\nSHAP analysis skipped: No feature matrix available (models trained on SMILES only)")
     else:
-        logger.info("\nNote: Model saving and SHAP analysis are only available in single split mode (--folds 1)")
-        logger.info("In k-fold CV mode, only performance metrics are saved.")
+        if config.save_cv_details:
+            logger.info(f"\nDetailed CV artifacts saved under: {out_dir / 'cv_data'}")
+        else:
+            logger.info("\nNote: Model saving and SHAP analysis are only available in single split mode (--folds 1)")
+            logger.info("Use --save-cv-details to persist per-fold/seed artifacts for post-hoc SHAP analysis.")
     
-    return summary_df
+    return result_payload
 
 # --------- Automatic Fingerprint Generation ---------
 def generate_fingerprints_from_csv(df: pd.DataFrame, smiles_column: str, 
@@ -4061,6 +4353,49 @@ def check_models_require_fingerprints(selected_models: List[str]) -> bool:
     
     return False
 
+def _normalize_metric_key(metric_key: str) -> str:
+    """
+    Normalize a metric key by removing suffixes such as '_mean' and '_val'
+    so we can construct stage-prefixed column names like 'Ex_AUC_mean'.
+    """
+    if not metric_key.endswith('_mean'):
+        return metric_key
+    base = metric_key[:-len('_mean')]
+    if base.endswith('_val'):
+        base = base[:-len('_val')]
+    return base
+
+def _aggregate_stage_summaries(frames: List[pd.DataFrame], stage_prefix: str) -> pd.DataFrame:
+    """
+    Aggregate metrics from multiple split seeds, prefix columns with stage label.
+    """
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    metric_mean_cols = [col for col in combined.columns if col.endswith('_mean')]
+    aggregated_rows = []
+
+    for model_name, group in combined.groupby('model'):
+        row = {
+            'model': model_name,
+            'model_type': group['model_type'].iloc[0] if 'model_type' in group.columns else None,
+            'split_seed_count': len(group)
+        }
+
+        for mean_col in metric_mean_cols:
+            values = pd.to_numeric(group[mean_col], errors='coerce').dropna()
+            base_name = _normalize_metric_key(mean_col)
+            mean_name = f"{stage_prefix}_{base_name}_mean"
+            std_name = f"{stage_prefix}_{base_name}_std"
+            if not values.empty:
+                row[mean_name] = float(values.mean())
+                row[std_name] = float(values.std(ddof=0))
+            else:
+                row[mean_name] = float('nan')
+                row[std_name] = float('nan')
+
+        aggregated_rows.append(row)
+
+    return pd.DataFrame(aggregated_rows)
+
 # --------- Command Line Interface ---------
 def main_cli():
     """Command line interface"""
@@ -4126,6 +4461,7 @@ External Test Set Evaluation:
     parser.add_argument('--folds', type=int, help='Number of CV folds (default: 5)')
     parser.add_argument('--seed', type=int, help='Random seed (default: 42)')
     parser.add_argument('--seeds', type=str, help='Comma-separated list of random seeds for multiple runs (e.g., 42,123,2025). If provided, overrides --seed.')
+    parser.add_argument('--split-seeds', type=str, help='Comma-separated list of seeds to use when creating Stage 1/2 splits (multi-run split robustness).')
     parser.add_argument('--test-size', type=float, help='Test size fraction (default: 0.2)')
     parser.add_argument('--epochs', type=int, help='Max epochs for deep models (default: 100)')
     parser.add_argument('--batch-size', type=int, help='Batch size for deep models (default: 32)')
@@ -4147,6 +4483,8 @@ External Test Set Evaluation:
                        help='Skip Stage 2 K-Fold CV on Development Set (Dev/External split + Stage 3 still run)')
     parser.add_argument('--tune-stage2', action='store_true',
                        help='Use Stage 2 CV to tune sklearn hyperparameters (Dev only, never touch External Test)')
+    parser.add_argument('--save-cv-details', action='store_true',
+                       help='Persist fold/seed models, processors, and training data for CV (useful for SHAP).')
     parser.add_argument('--tune-mode', choices=['grid', 'random'], default='grid',
                        help='Hyperparameter search mode for Stage 2 tuning')
     parser.add_argument('--cv-tune-metric', choices=['AUC', 'PR_AUC', 'ACC', 'F1', 'MCC', 'R2', 'RMSE', 'MAE'],
@@ -4183,6 +4521,7 @@ External Test Set Evaluation:
         if args.folds: config.folds = args.folds
         if args.seed: config.seed = args.seed
         if args.seeds: config.seeds = [int(s.strip()) for s in args.seeds.split(',')]
+        if args.split_seeds: config.split_seeds = [int(s.strip()) for s in args.split_seeds.split(',')]
         if args.test_size is not None: config.test_size = args.test_size
         if args.epochs: config.max_epochs = args.epochs
         if args.batch_size: config.batch_size = args.batch_size
@@ -4195,6 +4534,7 @@ External Test Set Evaluation:
         if args.no_auto_fp: config.auto_generate_fingerprints = False
         if args.fp_types: config.fingerprint_types = [fp.strip() for fp in args.fp_types.split(',')]
         if args.no_shap: config.run_shap = False
+        if args.save_cv_details: config.save_cv_details = True
         if args.skip_cv_stage2:
             config.run_cv_stage2 = False
         if args.tune_stage2:
@@ -4233,6 +4573,7 @@ External Test Set Evaluation:
             folds=args.folds or 5,
             seed=args.seed or 42,
             seeds=[int(s.strip()) for s in args.seeds.split(',')] if args.seeds else [args.seed or 42],
+            split_seeds=[int(s.strip()) for s in args.split_seeds.split(',')] if args.split_seeds else [args.seed or 42],
             selected_models=selected_models,
             output_dir=args.output or 'models_out',
             variance_threshold=args.variance_threshold or 0.01,
@@ -4246,6 +4587,7 @@ External Test Set Evaluation:
             external_test_metric=args.external_test_metric or ('MCC' if task == 'classification' else 'R2'),
             auto_generate_fingerprints=not args.no_auto_fp if hasattr(args, 'no_auto_fp') else True,
             fingerprint_types=[fp.strip() for fp in args.fp_types.split(',')] if hasattr(args, 'fp_types') and args.fp_types else ['morgan'],
+            save_cv_details=args.save_cv_details,
             run_cv_stage2=not args.skip_cv_stage2
         )
         if args.tune_stage2:
@@ -4255,6 +4597,9 @@ External Test Set Evaluation:
             if args.tune_iter is not None:
                 config.tune_iter = args.tune_iter
     
+    if not config.split_seeds:
+        config.split_seeds = [config.seed]
+
     # Set all random seeds for reproducibility
     # Use the first seed from the seeds list for initial setup
     initial_seed = config.seeds[0] if config.seeds else config.seed
@@ -4302,12 +4647,23 @@ External Test Set Evaluation:
     
     if n_invalid > 0:
         logger.warning(f"Found {n_invalid} invalid SMILES strings out of {len(smiles_list)} total.")
-        logger.warning("Invalid SMILES entries will be skipped by GAT and ChemBERTa models.")
+        logger.warning("Invalid SMILES entries will be filtered out for all models.")
         if n_invalid <= 10:
             invalid_ids = [df[config.id_column].iloc[i] for i in invalid_indices]
             logger.warning(f"Invalid IDs: {invalid_ids}")
         else:
+            logger.warning(f"First 10 invalid IDs: {[df[config.id_column].iloc[i] for i in invalid_indices[:10]]}")
             logger.warning("Consider cleaning your data with a SMILES validation script before running.")
+        
+        # Filter out invalid SMILES and corresponding data for ALL models
+        valid_mask = np.array(validity_list)
+        df = df.loc[valid_mask].reset_index(drop=True)
+        if X is not None:
+            X = X[valid_mask]
+        y = y[valid_mask]
+        smiles_list = [smiles_list[i] for i, valid in enumerate(validity_list) if valid]
+        ids = [ids[i] for i, valid in enumerate(validity_list) if valid]
+        logger.info(f"Filtered out {n_invalid} invalid SMILES samples. Remaining samples: {len(df)}")
     else:
         logger.info("All SMILES strings are valid.")
     
@@ -4442,14 +4798,99 @@ External Test Set Evaluation:
     
     logger.info(f"Selected models: {config.selected_models}")
     
-    # Run pipeline
-    summary_df = main_pipeline(
-        config, X, y, df[filtered_cols], smiles_list, ids, logger
-    )
-    
-    if summary_df is not None:
-        logger.info("\n=== Summary ===")
-        logger.info(summary_df.to_string(index=False))
+    split_seeds = config.split_seeds or [config.seed]
+    aggregate_results_dir = run_output_dir / "results"
+    aggregate_results_dir.mkdir(parents=True, exist_ok=True)
+
+    split_ext_summary_frames = []
+    split_cv_summary_frames = []
+    split_ext_row_frames = []
+    split_cv_row_frames = []
+
+    for split_seed in split_seeds:
+        split_dir = run_output_dir / f"split_seed_{split_seed}"
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        config_split = copy.copy(config)
+        config_split.output_dir = str(split_dir)
+
+        logger.info(f"\n=== Running pipeline for split seed {split_seed} ===")
+        summary_dict = main_pipeline(
+            config_split, X, y, df[filtered_cols], smiles_list, ids, logger, split_seed=split_seed
+        )
+        if not summary_dict:
+            continue
+
+        ext_summary = summary_dict.get('external_summary')
+        if ext_summary is not None and not ext_summary.empty:
+            ext_copy = ext_summary.copy()
+            ext_copy['split_seed'] = split_seed
+            split_ext_summary_frames.append(ext_copy)
+
+        cv_summary = summary_dict.get('cv_summary')
+        if cv_summary is not None and not cv_summary.empty:
+            cv_copy = cv_summary.copy()
+            cv_copy['split_seed'] = split_seed
+            split_cv_summary_frames.append(cv_copy)
+
+        ext_rows = summary_dict.get('external_rows')
+        if ext_rows is not None and not ext_rows.empty:
+            ext_rows_copy = ext_rows.copy()
+            ext_rows_copy['split_seed'] = split_seed
+            ext_rows_copy['stage'] = 'external'
+            split_ext_row_frames.append(ext_rows_copy)
+
+        cv_rows = summary_dict.get('cv_rows')
+        if cv_rows is not None and not cv_rows.empty:
+            cv_rows_copy = cv_rows.copy()
+            cv_rows_copy['split_seed'] = split_seed
+            cv_rows_copy['stage'] = 'cv'
+            split_cv_row_frames.append(cv_rows_copy)
+
+    summary_messages = []
+    stage_aggregated_frames = []
+    stage_configs = [
+        ('external', split_ext_summary_frames, 'Ex', "all_split_external_summary.csv"),
+        ('cv', split_cv_summary_frames, 'CV', "all_split_cv_summary.csv"),
+    ]
+
+    for stage_name, frames, prefix, filename in stage_configs:
+        if not frames:
+            continue
+        agg_df = _aggregate_stage_summaries(frames, prefix)
+        agg_df.insert(0, 'stage', stage_name)
+        stage_path = aggregate_results_dir / filename
+        agg_df.to_csv(stage_path, index=False)
+        summary_messages.append(f"  - {stage_path} (aggregated {stage_name} metrics)")
+        stage_aggregated_frames.append(agg_df)
+
+    if stage_aggregated_frames:
+        combined_df = pd.concat(stage_aggregated_frames, ignore_index=True, sort=False)
+        cols = ['stage'] + [col for col in combined_df.columns if col != 'stage']
+        combined_df = combined_df[cols]
+        combined_summary_path = aggregate_results_dir / "all_split_summaries.csv"
+        combined_df.to_csv(combined_summary_path, index=False)
+        summary_messages.append(f"  - {combined_summary_path} (per-stage summary across splits)")
+
+    if split_ext_row_frames or split_cv_row_frames:
+        row_frames = []
+        if split_ext_row_frames:
+            row_frames.append(pd.concat(split_ext_row_frames, ignore_index=True, sort=False))
+        if split_cv_row_frames:
+            row_frames.append(pd.concat(split_cv_row_frames, ignore_index=True, sort=False))
+
+        if row_frames:
+            all_rows_df = pd.concat(row_frames, ignore_index=True, sort=False)
+            cols = ['stage'] + [col for col in all_rows_df.columns if col != 'stage']
+            all_rows_df = all_rows_df[cols]
+            all_rows_path = aggregate_results_dir / "all_split_row_data.csv"
+            all_rows_df.to_csv(all_rows_path, index=False)
+            summary_messages.append(f"  - {all_rows_path} (all row data across splits)")
+
+    if summary_messages:
+        logger.info("\nCombined split summaries saved to:")
+        for msg in summary_messages:
+            logger.info(msg)
 
 if __name__ == "__main__":
     main_cli()

@@ -38,6 +38,7 @@ Supports two validation modes:
 - **Enhanced Model Saving**: Saves feature processors in K-Fold CV mode, supporting same transformation on new data
 - **ScaffoldKFold Improvements**: Uses greedy allocation strategy to avoid empty folds in K-Fold CV, resulting in more balanced sample distribution
 - **CV Split Method Selection**: Added `--cv-split-method` parameter to independently control K-Fold cross-validation split method
+- **K-Fold CV Detailed Saving for SHAP**: Introduced `--save-cv-details` parameter to save models, processed features, labels, SMILES, IDs, and feature processors for each fold and seed during K-fold cross-validation. This enables robust post-hoc SHAP analysis for all model types, including deep learning, for each fold.
 
 ## Input Data Format
 

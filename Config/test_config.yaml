@@ -56,20 +56,19 @@ folds: 5
 # Options: Any integer (recommended: 42 for consistency)
 seed: 42
 
-# Multiple random seeds for robustness testing
-# When provided, each model will be trained multiple times with different seeds
-# and results will be aggregated to provide mean ± std metrics
-# This is particularly useful for:
-#   - Evaluating model stability across different random initializations
-#   - Obtaining more reliable performance estimates with confidence intervals
-#   - Reducing the impact of random seed selection on model performance
-# Note: If provided, this overrides the single seed parameter
+# Multiple random seeds for robustness testing (model-level randomness)
+# Provide a single fixed value when you want deterministic training behavior
+# across model internal randomness; Stage1/2 multi-run splits are controlled by `split_seeds`.
 # Options: List of integers (recommended: 3-5 different seeds for robustness)
 # Examples:
-#   seeds: [42, 123, 2025]      # Multiple seeds for robustness testing
-#   seeds: [42]                  # Single seed (equivalent to seed: 42)
+#   seeds: [42]                  # Keep model randomness fixed while varying split_seeds
 #   seeds: []                    # Use default single seed (seed: 42)
-seeds: [42, 123, 2025]
+seeds: [42]
+
+# Multiple random split seeds (Stage 1/2)
+# Each seed reruns the Dev/External split plus CV folds; outputs go under `split_seed_<seed>/`.
+# Aggregated summaries and row-level data appear in `results/all_split_*` and `results/all_split_row_data.csv`.
+split_seeds: [3, 25, 2026]
 
 # Method for splitting data into train/validation/test sets
 # Options:
@@ -221,7 +220,7 @@ early_stopping_patience: 5
 #   - 1.0: EF1% (top 1%) - recommended
 #   - 5.0: EF5% (top 5%)
 #   - 10.0: EF10% (top 10%)
-ef_percentile: 1.0
+ef_percentile: 5.0
 
 # ------------------------------------------------------------------------------
 # SHAP Analysis Configuration
