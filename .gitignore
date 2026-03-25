@@ -1,6 +1,7 @@
 # 忽略 Python 缓存
 __pycache__/
 *.py[cod]
+*$py.class
 
 # 忽略日志和临时文件
 *.log
@@ -19,9 +20,7 @@ pretrained_model/
 *.safetensors
 *.zip
 
-# 忽略实验结果和模型权重（非常重要！）
+# 排除大型输出和临时文件
 models_out/
-results/
-*.pt
-*.joblib
-*.npy
+_smoke_out_regression_nan_alignment/
+.ipynb_checkpoints/
