@@ -136,7 +136,7 @@ external_test_metric: "MCC"
 #   selected_models: ["LR","RFC","SVC","XGBC","ETC"]   # Traditional only
 #   selected_models: []                               # Train all available models
 # selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
-selected_models: ["SVC", "MLP"]
+selected_models: ["SVC", "MLP","GAT"]
 
 # ------------------------------------------------------------------------------
 # Output Configuration

@@ -2,8 +2,8 @@
 """Export SHAP-style contributions for PyTorch models trained by the QSAR pipeline.
 Usage:
 python Scripts/export_pytorch_contributions.py \
-  -p models_out/classification_20260326_164025/split_seed_3 \
-  -m MLP \
+  -p models_out/classification_20260326_180529/split_seed_3 \
+  -m GAT \
   -s 42 \
   --background-size 50
 """
@@ -28,7 +28,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from Scripts.qsar_modeling_pytorch import ResidualMLP, DEVICE
+from Scripts.qsar_modeling_pytorch import (
+    ResidualMLP,
+    DEVICE,
+    GATModel,
+    smiles_to_graph,
+    GAT_AVAILABLE,
+    GAT_NUM_NODE_FEATURES,
+    GAT_NUM_EDGE_FEATURES,
+)
 
 
 def load_npz_data(path: Path) -> Dict[str, Any]:
@@ -152,41 +160,98 @@ def main():
 
     metadata = _load_metadata(seed_dir)
     model_type = metadata.get('model_type', 'pytorch')
-    if model_type != 'pytorch':
-        raise NotImplementedError("Currently only MLP (pytorch) models are supported for contribution export")
-
-    model_config = metadata.get('model_config', {})
-    input_dim = _determine_input_dim(metadata, external_data['features'], model_config)
-    model = _instantiate_mlp(model_config, input_dim)
-    model_path = seed_dir / "model.pt"
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file missing: {model_path}")
-    device = torch.device(args.device)
-    state = torch.load(model_path, map_location=device)
-    model.load_state_dict(state)
-    model = model.to(device).eval()
+    export_payload = {}
 
     X_ext = external_data['features']
     if X_ext.size == 0:
         raise ValueError("External features are empty, nothing to explain.")
 
-    background = torch.tensor(X_ext[:args.background_size], dtype=torch.float32).to(device)
-    dataset = torch.tensor(X_ext, dtype=torch.float32).to(device)
+    def _object_array(items):
+        arr = np.empty(len(items), dtype=object)
+        for idx, item in enumerate(items):
+            arr[idx] = np.asarray(item)
+        return arr
 
-    explainer = shap.GradientExplainer(model, background)
-    shap_values = explainer.shap_values(dataset)
-    shap_array = _select_shap_array(shap_values, X_ext.shape[1])
+    if model_type == 'pytorch':
+        model_config = metadata.get('model_config', {})
+        input_dim = _determine_input_dim(metadata, X_ext, model_config)
+        model = _instantiate_mlp(model_config, input_dim)
+        model_path = seed_dir / "model.pt"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file missing: {model_path}")
+        device = torch.device(args.device)
+        state = torch.load(model_path, map_location=device)
+        model.load_state_dict(state)
+        model = model.to(device).eval()
 
-    base_values = getattr(explainer, 'expected_value', None)
-    if base_values is None:
-        base_values = getattr(explainer, 'expected_values', None)
-    base_values = _to_numpy(base_values)
+        background = torch.tensor(X_ext[:args.background_size], dtype=torch.float32).to(device)
+        dataset = torch.tensor(X_ext, dtype=torch.float32).to(device)
+
+        explainer = shap.GradientExplainer(model, background)
+        shap_values = explainer.shap_values(dataset)
+        shap_array = _select_shap_array(shap_values, X_ext.shape[1])
+
+        base_values = getattr(explainer, 'expected_value', None)
+        if base_values is None:
+            base_values = getattr(explainer, 'expected_values', None)
+        base_values = _to_numpy(base_values)
+
+        export_payload.update({
+            "shap_values": np.asarray(shap_array),
+            "base_values": np.asarray(base_values) if base_values is not None else None,
+        })
+    elif model_type == 'pytorch_geometric':
+        if not GAT_AVAILABLE:
+            raise ImportError("PyTorch Geometric (GAT) support is not installed in this environment.")
+        model = GATModel(
+            num_node_features=GAT_NUM_NODE_FEATURES,
+            num_edge_features=GAT_NUM_EDGE_FEATURES,
+            hidden_dim=64,
+            num_heads=4,
+            num_layers=3,
+            dropout=0.3,
+        )
+        model_path = seed_dir / "model.pt"
+        if not model_path.exists():
+            raise FileNotFoundError(f"GAT model file missing: {model_path}")
+        device = torch.device(args.device)
+        state = torch.load(model_path, map_location=device)
+        model.load_state_dict(state)
+        model = model.to(device).eval()
+
+        smiles_list = external_data.get('smiles') or []
+        if not smiles_list:
+            raise ValueError("SMILES strings are required to build GAT graphs.")
+
+        graphs = []
+        valid_indices = []
+        for idx, smiles in enumerate(smiles_list):
+            graph = smiles_to_graph(smiles)
+            if graph is not None:
+                graphs.append(graph)
+                valid_indices.append(idx)
+
+        if not graphs:
+            raise ValueError("No valid GAT graphs could be constructed from the external SMILES.")
+
+        node_features = [graph.x.detach().cpu().numpy() for graph in graphs]
+        edge_indices = [graph.edge_index.detach().cpu().numpy() for graph in graphs]
+        edge_attrs = [graph.edge_attr.detach().cpu().numpy() if graph.edge_attr is not None else np.empty((0, GAT_NUM_EDGE_FEATURES)) for graph in graphs]
+
+        export_payload.update({
+            "shap_values": None,
+            "node_features": _object_array(node_features),
+            "edge_indices": _object_array(edge_indices),
+            "edge_attrs": _object_array(edge_attrs),
+            "valid_indices": np.array(valid_indices, dtype=int),
+        })
+    else:
+        raise NotImplementedError(f"Model type '{model_type}' is not supported yet.")
 
     save_path = output_dir / "pytorch_shap_export.npz"
     np.savez_compressed(
         save_path,
-        shap_values=np.asarray(shap_array),
-        base_values=np.asarray(base_values) if base_values is not None else None,
+        **export_payload,
         features=np.asarray(X_ext, dtype=float),
         feature_names=np.array(external_data['feature_names'], dtype=object) if external_data['feature_names'] else None,
         ids=np.array(external_data['ids'], dtype=object) if external_data['ids'] else None,

@@ -1,0 +1,6 @@
+gat_interpretation:
+  aggregation_method: "sum"           # options: sum, mean (currently only sum is supported)
+  scaling_strategy: "global_max_abs"
+  clipping_threshold: 0.995           # quantile for abs-value clipping
+  output_format: "csv_plus_npz"
+  device: "cuda"                     # device for model inference
