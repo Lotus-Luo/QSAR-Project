@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from Scripts.qsar_modeling_pytorch import GATModel, GAT_NUM_EDGE_FEATURES, GAT_NUM_NODE_FEATURES
 
-DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "shap_runner_config.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "Shap_config" / "shap_gat_runner_config.yaml"
 
 
 def _load_config(path: Optional[Path]) -> Dict[str, Any]:
