@@ -1,3 +1,6 @@
+# Usage:
+# python ./Scripts/qsar_modeling_pytorch.py -c Config/test_config.yaml
+
 # QSAR Modeling Configuration File
 # This configuration file is used for testing qsar_modeling_pytorch.py
 # Modify the parameters below to customize your modeling pipeline
@@ -136,7 +139,7 @@ external_test_metric: "MCC"
 #   selected_models: ["LR","RFC","SVC","XGBC","ETC"]   # Traditional only
 #   selected_models: []                               # Train all available models
 # selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
-selected_models: ["SVC", "MLP","GAT"]
+selected_models: ["SVC", "MLP","GAT","ChemBERTa"]
 
 # ------------------------------------------------------------------------------
 # Output Configuration

@@ -1241,7 +1241,7 @@ class MoleculeDataset(Dataset):
 
 # --------- ChemBERTa Model ---------
 try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification, RobertaForSequenceClassification
     # DeepChem/ChemBERTa-77M-MLM, DeepChem/ChemBERTa-77M-MTR, seyonec/ChemBERTa-zinc-base-v1
     class ChemBERTaModel(nn.Module):
         """

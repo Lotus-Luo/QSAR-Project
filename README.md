@@ -398,6 +398,15 @@ python Scripts/visualize.py \
 
 This produces `external_roc_pr.svg`, `cv_roc_pr.svg`, `external_metric_boxplots.svg`, and `cv_metric_boxplots.svg` inside `models_out/.../figures/`, all following the Times New Roman + Nature/Science style you asked for.
 
+### SHAP export & runner helpers
+
+- `Scripts/export_pytorch_contributions.py` exports the Stage 1 SHAP-style tensors for MLP, GAT, and ChemBERTa runs (including token maps, attention masks, background samples, and metadata) so downstream visualizers can rehydrate the data without retraining.
+- `Scripts/run_gat_shap_runner.py` loads a GAT export, runs Captum IntegratedGradients on the atom features, applies the configured clipping/normalization, and writes `gat_atom_contributions.{csv,npz}` into the `shape/<model>/seed_<n>` tree.
+- `Scripts/run_chemberta_shap_runner.py` runs LayerIntegratedGradients on the ChemBERTa embedding layer, aggregates attributions back to each token, and saves `chemberta_token_contributions.{csv,npz}` alongside tokenizer metadata for heatmap rendering.
+- `Scripts/visualize_exported_contributions.py` consumes the Stage 1 export plus the optional GAT/ChemBERTa runners to render SHAP summaries, similarity maps, and token-level heatmaps with Times New Roman typography and the `RdBu_r` palette (no extra normalization so comparisons stay consistent across molecules).
+- `Scripts/gat_global_shap_summary.py` reads the GAT contribution file, matches common SMARTS patterns (benzene, amide, hydroxyl, etc.), and plots a Times New Roman bar chart of the mean SHAP impact per substructure.
+- `Scripts/external_shap_analysis.py` runs SHAP directly on saved traditional models and the external test set, producing summary/heatmap plots with the same Times New Roman styling to keep the post-hoc figures cohesive.
+
 ## Available Models
 
 ## Available Models

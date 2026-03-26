@@ -6,6 +6,11 @@ python Scripts/export_pytorch_contributions.py \
   -m GAT \
   -s 42 \
   --background-size 50
+
+python Scripts/export_pytorch_contributions.py \
+  -p models_out/classification_20260326_213228/split_seed_3 \
+  -m ChemBERTa \
+  -s 42
 """
 
 import argparse
@@ -37,6 +42,11 @@ from Scripts.qsar_modeling_pytorch import (
     GAT_NUM_NODE_FEATURES,
     GAT_NUM_EDGE_FEATURES,
 )
+
+try:
+    from transformers import AutoTokenizer
+except ImportError:  # pragma: no cover
+    AutoTokenizer = None
 
 
 def load_npz_data(path: Path) -> Dict[str, Any]:
@@ -132,6 +142,39 @@ def _select_shap_array(shap_values: Any, n_features: int) -> np.ndarray:
     return np.asarray(_to_numpy(shap_values))
 
 
+def _encode_chemb_smiles(tokenizer, smiles_list, max_length: int):
+    if tokenizer is None:
+        raise SystemExit("Transformers are required for ChemBERTa export (pip install transformers).")
+    token_ids = []
+    attention_masks = []
+    token_offsets = []
+    token_strings = []
+    valid_indices = []
+    for idx, smiles in enumerate(smiles_list):
+        if not smiles or str(smiles).strip() == "":
+            continue
+        encoding = tokenizer(
+            smiles,
+            truncation=True,
+            padding='max_length',
+            max_length=max_length,
+            return_tensors='pt',
+            return_offsets_mapping=True,
+        )
+        ids = encoding['input_ids'][0].cpu().numpy()
+        mask = encoding['attention_mask'][0].cpu().numpy()
+        offsets = encoding['offset_mapping'][0].cpu().numpy()
+        tokens = tokenizer.convert_ids_to_tokens(ids.tolist())
+        token_ids.append(ids)
+        attention_masks.append(mask)
+        token_offsets.append(offsets)
+        token_strings.append(np.array(tokens, dtype=object))
+        valid_indices.append(idx)
+    if not token_ids:
+        raise ValueError("No valid SMILES strings were tokenized for ChemBERTa export.")
+    return token_ids, attention_masks, token_offsets, token_strings, valid_indices
+
+
 def main():
     if shap is None:
         sys.exit("Shap is required: pip install shap")
@@ -143,6 +186,7 @@ def main():
     parser.add_argument("--external-data", type=Path, help="Path to saved external split (.npz)")
     parser.add_argument("-o", "--output-dir", type=Path, help="Where to store exported contributions")
     parser.add_argument("--background-size", type=int, default=50, help="Number of samples to build background reference")
+    parser.add_argument("--chemberta-max-length", type=int, default=128, help="Tokenization max length for ChemBERTa export")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device for model inference")
     args = parser.parse_args()
 
@@ -244,6 +288,32 @@ def main():
             "edge_indices": _object_array(edge_indices),
             "edge_attrs": _object_array(edge_attrs),
             "valid_indices": np.array(valid_indices, dtype=int),
+        })
+    elif model_type == 'transformer':
+        if AutoTokenizer is None:
+            raise SystemExit("Transformers are required for ChemBERTa export (pip install transformers).")
+        tokenizer_dir = seed_dir / "model"
+        if not tokenizer_dir.exists():
+            raise FileNotFoundError(f"ChemBERTa assets missing: {tokenizer_dir}")
+        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True)
+        smiles_list = external_data.get('smiles') or []
+        if not smiles_list:
+            raise ValueError("SMILES strings are required for ChemBERTa export.")
+        max_length = args.chemberta_max_length
+        token_ids, attention_masks, token_offsets, token_strings, valid_indices = _encode_chemb_smiles(
+            tokenizer,
+            smiles_list,
+            max_length,
+        )
+        export_payload.update({
+            "shap_values": None,
+            "token_ids": _object_array(token_ids),
+            "attention_mask": _object_array(attention_masks),
+            "token_offsets": _object_array(token_offsets),
+            "token_strings": _object_array(token_strings),
+            "valid_indices": np.array(valid_indices, dtype=int),
+            "tokenizer_name": metadata.get('model_config', {}).get('params', {}).get('model_name'),
+            "tokenizer_max_length": max_length,
         })
     else:
         raise NotImplementedError(f"Model type '{model_type}' is not supported yet.")

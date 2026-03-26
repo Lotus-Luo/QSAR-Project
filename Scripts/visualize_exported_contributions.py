@@ -18,6 +18,15 @@ python Scripts/visualize_exported_contributions.py \
   --gat-max-molecules 16 \
   --gat-image-size 600
 
+python Scripts/visualize_exported_contributions.py \
+  -i models_out/classification_20260326_213228/split_seed_3/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
+  -m ChemBERTa \
+  -s 42 \
+  --chemberta-token-contributions models_out/classification_20260326_213228/split_seed_3/shape/ChemBERTa/seed_42/chemberta_token_contributions.npz \
+  --heatmap-samples 64 \
+  --output-dir models_out/classification_20260326_213228/split_seed_3/shape/ChemBERTa/seed_42/figures
+
+
 --o ./model_out/classificationXXX/split_seed_x/shape/<model>/seed_y (defualt)
 """
 
@@ -28,6 +37,7 @@ from typing import Iterable, Optional
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors as mpl_colors
 from matplotlib.ticker import MultipleLocator
 import numpy as np
 import pandas as pd
@@ -316,6 +326,76 @@ def _visualize_gat_contributions(
     return saved
 
 
+def _load_chemberta_token_data(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"ChemBERTa token contributions file missing: {path}")
+    data = np.load(path, allow_pickle=True)
+    token_contributions = [np.asarray(entry) for entry in np.atleast_1d(data["token_contributions"])]
+    return {
+        "token_contributions": token_contributions,
+        "token_strings": [np.asarray(entry, dtype=object) for entry in np.atleast_1d(data["token_strings"])],
+        "attention_mask": [np.asarray(entry) for entry in np.atleast_1d(data["attention_mask"])],
+        "token_offsets": [np.asarray(entry) for entry in np.atleast_1d(data["token_offsets"])],
+        "valid_indices": np.atleast_1d(data.get("valid_indices", np.arange(len(token_contributions)))).astype(int),
+        "ids": np.atleast_1d(data.get("ids") if data.get("ids") is not None else []),
+        "smiles": np.atleast_1d(data.get("smiles") if data.get("smiles") is not None else []),
+    }
+
+
+def _render_chemberta_token_heatmap(data, output_dir: Path, max_samples: int):
+    token_contributions = data["token_contributions"]
+    attention_masks = data["attention_mask"]
+    token_strings = data["token_strings"]
+    valid_indices = data["valid_indices"]
+    ids = data["ids"]
+    smiles = data["smiles"]
+    contrib_scores = [float(np.sum(np.abs(attr))) for attr in token_contributions]
+    if not contrib_scores:
+        print("ChemBERTa token contributions contain no samples.")
+        return
+    order = np.argsort(contrib_scores)[::-1][:max_samples]
+    max_tokens = int(max(np.sum(mask) for mask in attention_masks))
+    max_samples = min(max_samples, len(order))
+    vmax = max(np.max(np.abs(attr)) for attr in token_contributions) if token_contributions else 1.0
+    vmax = float(max(vmax, 1e-6))
+    norm = mpl_colors.TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+    cmap = plt.get_cmap("RdBu_r")
+    height = max(4, max_samples * 0.6 + 1)
+    fig, ax = plt.subplots(figsize=(12, height))
+    ax.set_xlim(-2, max_tokens + 2)
+    ax.set_ylim(-0.5, max_samples - 0.5)
+    ax.set_axis_off()
+    for row_idx, sample_pos in enumerate(order):
+        y = max_samples - row_idx - 1
+        tokens = token_strings[sample_pos]
+        mask = attention_masks[sample_pos]
+        contributions = token_contributions[sample_pos]
+        x = 0
+        for token, weight, attn in zip(tokens, contributions, mask):
+            if int(attn) == 0:
+                break
+            ax.text(
+                x,
+                y,
+                str(token),
+                fontname="Times New Roman",
+                fontsize=12,
+                color=cmap(norm(weight)),
+                ha="left",
+                va="center",
+            )
+            x += 1
+        label_idx = valid_indices[sample_pos] if sample_pos < len(valid_indices) else sample_pos
+        label = ids[label_idx] if label_idx < len(ids) else f"idx_{label_idx}"
+        ax.text(-1.5, y, str(label), fontname="Times New Roman", fontsize=10, ha="right", va="center")
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, orientation="vertical", pad=0.02, label="Token contribution")
+    chart_path = output_dir / "chemberta_token_heatmap"
+    _save_fig(fig, chart_path)
+    print(f"ChemBERTa token heatmap saved to: {chart_path}.png")
+
+
 def _prepare_base_values(base_values, n_outputs: int):
     if base_values is None:
         return np.zeros((n_outputs,))
@@ -337,6 +417,8 @@ def main():
     parser.add_argument("--shape-root", type=Path, help="Optional base run directory for shape outputs")
     parser.add_argument("--max-display", type=int, default=25, help="Max features to display")
     parser.add_argument("--heatmap-samples", type=int, default=64, help="Samples for the heatmap")
+    parser.add_argument("--chemberta-token-contributions", type=Path, help="ChemBERTa token contributions .npz for text heatmap")
+    parser.add_argument("--chemberta-max-samples", type=int, default=16, help="Max sequences to render in ChemBERTa heatmap")
     parser.add_argument("--gat-contributions", type=Path, help="CSV or NPZ with per-atom GAT contributions")
     parser.add_argument("--gat-max-molecules", type=int, default=16, help="Max number of GAT molecules to visualize")
     parser.add_argument("--gat-image-size", type=int, default=360, help="Square pixel size for each GAT similarity map")
@@ -355,6 +437,11 @@ def main():
         shape_root = base_root / "shape" / args.model_key / f"seed_{args.seed}"
     shape_root.mkdir(parents=True, exist_ok=True)
     output_dir = shape_root
+
+    if args.chemberta_token_contributions:
+        chem_data = _load_chemberta_token_data(args.chemberta_token_contributions)
+        _render_chemberta_token_heatmap(chem_data, output_dir, args.chemberta_max_samples)
+        return
 
     if args.gat_contributions:
         saved = _visualize_gat_contributions(
