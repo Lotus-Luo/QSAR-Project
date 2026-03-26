@@ -2333,6 +2333,73 @@ def _save_cv_fold_seed_details(root_dir: Path,
             if logger:
                 logger.warning(f"    ✗ Failed to save PyTorch config: {exc}")
 
+
+def _save_full_dev_model_artifacts(root_dir: Path,
+                                   model_key: str,
+                                   seed: int,
+                                   model_config: Dict[str, Any],
+                                   model_type: str,
+                                   model_obj,
+                                   scaler,
+                                   task: str,
+                                   external_data_path: Optional[Path],
+                                   feature_mask_path: Optional[Path],
+                                   feature_names: Optional[List[str]],
+                                   input_dim: Optional[int],
+                                   logger: logging.Logger = None):
+    """Persist Stage 3 (full Development Set) artifacts for SHAP."""
+    if root_dir is None or model_obj is None:
+        return
+
+    seed_dir = root_dir / model_key / f"seed_{seed}"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = seed_dir / "model"
+    try:
+        if model_type == 'sklearn':
+            _save_sklearn_model(model_obj, model_path)
+        else:
+            _save_pytorch_model(model_obj, model_path, model_type)
+    except Exception as exc:
+        if logger:
+            logger.warning(f"    ✗ Failed to save full development model: {exc}")
+    else:
+        if logger:
+            logger.info(f"    ✓ Saved full development model: {model_path}")
+
+    try:
+        import joblib
+        if scaler is not None:
+            joblib.dump(scaler, seed_dir / "scaler.joblib")
+            if logger:
+                logger.info(f"    ✓ Saved scaler: {seed_dir / 'scaler.joblib'}")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"    ✗ Failed to save scaler: {exc}")
+
+    metadata = {
+        'model_key': model_key,
+        'seed': seed,
+        'task': task,
+        'model_type': model_type,
+        'external_data': str(external_data_path) if external_data_path is not None else None,
+        'feature_mask': str(feature_mask_path) if feature_mask_path is not None else None,
+        'feature_names': feature_names,
+        'input_dim': input_dim,
+        'saved_at': datetime.utcnow().isoformat() + 'Z'
+    }
+    with open(seed_dir / "metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    config_snapshot = {
+        'model_key': model_key,
+        'model_type': model_type,
+        'params': dict(model_config.get('params', {})) if model_config else {},
+        'input_dim': input_dim
+    }
+    with open(seed_dir / "model_config.json", 'w') as f:
+        json.dump(config_snapshot, f, indent=2)
+
 # --------- SHAP Analysis ---------
 def run_shap_analysis(model_path: Path, X_train: pd.DataFrame, X_val: pd.DataFrame,
                      model_key: str, out_dir: Path, task: str,
@@ -3103,6 +3170,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
     
     all_fold_results = []  # Store results from all folds
     external_test_results = []  # Store external test results
+    external_split_path: Optional[Path] = None
     
     if use_cv:
         # K-Fold Cross-Validation with two-stage split
@@ -3167,16 +3235,37 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         
         # Always apply global feature filtering on Development Set.
         # This ensures Stage 2 (CV) and Stage 3 (final external evaluation) use the same feature set.
+        X_ext_test_filtered = None
         if X_dev is not None:
             logger.info(f"\n--- Global Feature Filtering on Development Set ---")
             fp_cols = select_fp_columns(feature_df)
             X_dev_filtered, dev_feature_mask, dev_feature_names_filtered = apply_global_feature_filtering(
                 X_dev, config, logger, feature_names=fp_cols
             )
+            if X_ext_test is not None and dev_feature_mask is not None:
+                X_ext_test_filtered = X_ext_test[:, dev_feature_mask]
+            elif X_ext_test is not None:
+                X_ext_test_filtered = X_ext_test
         else:
             X_dev_filtered = X_dev
             dev_feature_mask = None
             dev_feature_names_filtered = None
+            if X_ext_test is not None:
+                X_ext_test_filtered = X_ext_test
+
+        # Persist External Test Set split for downstream SHAP analysis
+        split_data_dir = out_dir / "data" / "splits"
+        split_data_dir.mkdir(parents=True, exist_ok=True)
+        external_split_path = split_data_dir / "external_test.npz"
+        np.savez_compressed(
+            external_split_path,
+            features=X_ext_test_filtered if X_ext_test_filtered is not None else (np.array([], dtype=float) if X_ext_test is None else np.asarray(X_ext_test)),
+            labels=y_ext_test,
+            ids=np.array(ids_ext_test, dtype=object) if ids_ext_test is not None else np.array([], dtype=object),
+            smiles=np.array(smiles_ext_test, dtype=object) if smiles_ext_test is not None else np.array([], dtype=object),
+            feature_names=np.array(dev_feature_names_filtered if dev_feature_names_filtered is not None else [], dtype=object)
+        )
+        logger.info(f"External Test split saved to: {external_split_path}")
 
         if run_stage2_cv:
             # Stage 2: K-Fold Cross-Validation on Development Set
@@ -3507,6 +3596,9 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info(f"Evaluating all models on External Test Set ({len(y_ext_test)} samples)")
         logger.info(f"Using {len(config.seeds)} seeds: {config.seeds}")
         logger.info(f"Best model will be selected based on: {config.external_test_metric}")
+        full_dev_models_dir = out_dir / "models" / "full_dev"
+        full_dev_models_dir.mkdir(parents=True, exist_ok=True)
+        feature_mask_path = (out_dir / "feature_processors" / "feature_mask.npy") if dev_feature_mask is not None else None
         if run_stage2_cv:
             logger.info(
                 "Split integrity: External indices are excluded from Stage 2 (CV/tuning); "
@@ -3567,9 +3659,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             
             for seed_idx, seed in enumerate(config.seeds):
                 logger.info(f"\n--- Seed {seed_idx+1}/{len(config.seeds)} (seed={seed}) ---")
-                
+
                 # Set random seed for reproducibility
                 set_all_seeds(seed, logger)
+                scaler = None
                 
                 # Prepare data based on model type
                 # Apply standardization only for models that need it (gradient-based)
@@ -3754,6 +3847,22 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                     logger.info(f"    RMSE: {ext_test_metrics.get('RMSE', 'N/A'):.4f}")
                     logger.info(f"    MAE: {ext_test_metrics.get('MAE', 'N/A'):.4f}")
                 
+                _save_full_dev_model_artifacts(
+                    root_dir=full_dev_models_dir,
+                    model_key=model_key,
+                    seed=seed,
+                    model_config=model_config,
+                    model_type=model_config.get('type', 'sklearn'),
+                    model_obj=model_result['model'],
+                    scaler=scaler,
+                    task=config.task,
+                    external_data_path=external_split_path,
+                    feature_mask_path=feature_mask_path,
+                    feature_names=dev_feature_names_filtered,
+                    input_dim=X_dev_for_ext_test.shape[1] if X_dev_for_ext_test is not None else None,
+                    logger=logger
+                )
+
                 # GPU memory management: clear cache after each seed
                 if model_type_category == 'deep_learning' and torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -3994,7 +4103,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info(f"  - {out_dir / 'results' / 'external_test_results.csv'} (metrics for all models and seeds)")
         logger.info(f"  - {out_dir / 'results' / 'external_test_summary.csv'} (mean ± std across seeds)")
         logger.info(f"  - {out_dir / 'predictions' / 'external_test_predictions.csv'} (predictions for all models and seeds)")
-        
+        logger.info(f"Full Development models (all seeds) saved to: {full_dev_models_dir}")
+        if external_split_path is not None:
+            logger.info(f"External Test split saved for SHAP analysis: {external_split_path}")
+
     else:
         # Single train/validation split
         logger.info(f"{'='*60}")
