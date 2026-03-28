@@ -12,7 +12,6 @@ Usage example:
 python Scripts/predict_qsar_models.py \
      --run-dir models_out/classification_20260326_213228/split_seed_3 \
     --input Data/prediction_test_data_fingerprints.csv \
-    --output predictions/Virtual_Screening_Result.csv \
      --models "GAT,ChemBERTa,RFC,SVC" \
     --batch-size 64
         
@@ -472,7 +471,15 @@ def main():
     if not used_models:
         raise SystemExit("No predictions could be generated")
 
-    output_path = args.output or (run_dir / "predictions" / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    predicted_cols = [col for col in result_df.columns if col.endswith("_predicted")]
+    if predicted_cols:
+        result_df["Consensus_Sum"] = result_df[predicted_cols].fillna(0).sum(axis=1).astype(int)
+
+    default_root = Path("virtual_screening")
+    parent_name = run_dir.parent.name or run_dir.name
+    input_stem = Path(args.input).stem  # 获取输入文件的文件名（不带后缀）
+    default_path = default_root / f"VS_{input_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    output_path = args.output or default_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result_df.to_csv(output_path, index=False)
     logger.info(f"Saved predictions for {len(used_models)} models to {output_path}")
