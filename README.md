@@ -11,26 +11,41 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 2. **Prepare your CSV** with `id`, `smiles`, `label`, and optional `pic50`.
 3. **Run training** via the config (e.g., `Config/test_config.yaml`):
    ```bash
-   python Scripts/qsar_modeling_pytorch.py -c Config/test_config.yaml
+   python Scripts/step01_train_qsar_models.py -c Config/test_config.yaml
    ```
 4. **Inspect `models_out/{task}_{timestamp}`** for logs, results, predictions, saved models, and fingerprint/scaler processors.
 5. **Pretrained models download**: https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link
 
-## Core scripts
+## Scripts by stage
 
-- `Scripts/qsar_modeling_pytorch.py`: entry point for single-split or two-stage CV training of LR/RFC/SVC/XGBC/LGBMC/ETC, MLP, GAT, and ChemBERTa models.
-- `Scripts/export_pytorch_contributions.py`: exports Stage 1 tensors (nodes/fingerprints or tokens/masks) required by every downstream SHAP runner.
-- `Scripts/run_gat_shap_runner.py`: Captum IG on GAT node features; configuration lives in `Shap_config/shap_runner_config.yaml`.
-- `Scripts/run_chemberta_shap_runner.py`: LayerIntegratedGradients on ChemBERTa embeddings, saving per-token contributions plus offsets/IDs.
-- `Scripts/visualize_exported_contributions.py`: renders SHAP summaries, GAT similarity maps, and ChemBERTa token heatmaps with Times New Roman + `RdBu_r` styling.
-- `Scripts/gat_global_shap_summary.py`: accumulates SMARTS-based patterns (benzene, amide, hydroxyl, etc.) by mean SHAP effect and plots a bar chart.
-- `Scripts/external_shap_analysis.py`: SHAP for classical models on the external split, producing consistent summary/heatmap figures.
+### Stage 1 – Core Modeling
+- `Scripts/step01_train_qsar_models.py`: entry point for single-split or two-stage CV training of LR/RFC/SVC/XGBC/LGBMC/ETC, MLP, GAT, and ChemBERTa models.
+- `Scripts/step02_run_smoke_test.py`: lightweight regression/classification sanity checks covering NaNs, metrics, and ChemBERTa loader stability.
+
+### Stage 2 – Model interpretation / SHAP workflows
+- `Scripts/step11_extract_contributions.py`: exports SHAP-style tensors (fingerprints, GAT node features, ChemBERTa tokens) required by the SHAP runners.
+- `Scripts/step12_shap_interpreter_gat.py`: Captum IG on the exported GAT graphs using `Shap_config/shap_gat_runner_config.yaml`.
+- `Scripts/step13_shap_interpreter_chemberta.py`: LayerIntegratedGradients over ChemBERTa embeddings, producing token contributions plus offsets and SMILES.
+- `Scripts/step14_compare_external_shap.py`: SHAP on traditional classifiers (saved under `models/full_dev/`) evaluated on the external split; outputs summary + heatmap figures.
+- `Scripts/step15_summarize_global_features.py`: aggregates SMARTS-based patterns (benzene, amide, hydroxyl, etc.) by mean SHAP effect and draws a styled bar chart.
+
+### Stage 3 – Virtual screening pipeline
+- `Scripts/step21_vs_inference.py`: loads every saved model for a run, reapplies fingerprint preprocessing/scalers, and writes a wide predictions table with per-model columns plus `Consensus_Sum`.
+- `Scripts/step22_vs_filter_hits.py`: filters the virtual-screening table for candidates supported by at least `--min-sum` models and (optionally) one high-probability score.
+
+### Stage 4 – Visualization
+- `Scripts/step31_plot_performance_metrics.py`: aggregates metrics/predictions for publication-ready curves.
+- `Scripts/step32_plot_pharmacophore_maps.py`: renders ROC/PR, similarity maps, and ChemBERTa heatmaps using the Times New Roman + `RdBu_r` palette.
 
 ## SHAP workflows
 
-- **Traditional models (LR/RFC/SVC/XGBC/LGBMC/ETC/Ridge/RFR/ETR)**: train, then run `Scripts/external_shap_analysis.py -p models_out/... -m <model> -s <seed>` to compute SHAP on the saved external split.
-- **GAT**: export with `Scripts/export_pytorch_contributions.py -m GAT -s <seed>`, run `Scripts/run_gat_shap_runner.py --export .../pytorch_shap_export.npz` (config overrides from `Shap_config/shap_runner_config.yaml`), and visualize via `Scripts/visualize_exported_contributions.py --gat-contributions .../gat_atom_contributions.csv`.
-- **ChemBERTa**: export with `Scripts/export_pytorch_contributions.py -m ChemBERTa`, run `Scripts/run_chemberta_shap_runner.py --export .../pytorch_shap_export.npz --max-samples 64 --n-steps 32`, and use `Scripts/visualize_exported_contributions.py --chemberta-contributions .../chemberta_token_contributions.npz` for token-level heatmaps.
+- **Traditional models (LR/RFC/SVC/XGBC/LGBMC/ETC/Ridge/RFR/ETR)**: train, then run `Scripts/step14_compare_external_shap.py -p models_out/... -m <model> -s <seed>` to compute SHAP on the saved external split.
+- **GAT**: export with `Scripts/step11_extract_contributions.py -m GAT -s <seed>`, run `Scripts/step12_shap_interpreter_gat.py --export .../pytorch_shap_export.npz` (config overrides from `Shap_config/shap_gat_runner_config.yaml`), and visualize via `Scripts/step32_plot_pharmacophore_maps.py --gat-contributions .../gat_atom_contributions.csv`.
+- **ChemBERTa**: export with `Scripts/step11_extract_contributions.py -m ChemBERTa`, run `Scripts/step13_shap_interpreter_chemberta.py --export .../pytorch_shap_export.npz --max-samples 64 --n-steps 32`, and use `Scripts/step32_plot_pharmacophore_maps.py --chemberta-contributions .../chemberta_token_contributions.npz` for token-level heatmaps.
+
+## Virtual screening pipeline
+
+- Run `Scripts/step21_vs_inference.py` on a new compound list to create the wide prediction table (saved under `./virtual_screening/` by default), then prune with `Scripts/step22_vs_filter_hits.py --min-sum <N> [--min-score 0.7]` to shortlist high-confidence candidates.
 
 ## Outputs & metrics
 

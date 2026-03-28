@@ -4517,16 +4517,16 @@ def main_cli():
         epilog="""
 Examples:
   # Use YAML configuration file
-  python qsar_modeling_pytorch.py -c config.yaml
+  python step01_train_qsar_models.py -c config.yaml
   
   # Train specific models
-  python qsar_modeling_pytorch.py -i data.csv -l label -m xgbc,mlp
+  python step01_train_qsar_models.py -i data.csv -l label -m xgbc,mlp
   
   # Train all deep learning models
-  python qsar_modeling_pytorch.py -i data.csv -l label -s smiles -m mlp,gat,chemberta
+  python step01_train_qsar_models.py -i data.csv -l label -s smiles -m mlp,gat,chemberta
   
   # With SMILES for GNN models
-  python qsar_modeling_pytorch.py -i data.csv -l label -s smiles -m xgbc,gat -o output/
+  python step01_train_qsar_models.py -i data.csv -l label -s smiles -m xgbc,gat -o output/
 
 Input CSV Format:
   - id: Molecular unique identifier (e.g., ChEMBL ID)

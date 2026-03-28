@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Filter virtual hits from a QSAR prediction matrix.
 # Example usage:
-python Scripts/filter_virtual_hits.py \
+python Scripts/step22_vs_filter_hits.py \
     -i ./models_out/classification_20260326_213228/split_seed_3/predictions/predictions_20260328_211826.csv
 
-python Scripts/filter_virtual_hits.py \
+python Scripts/step22_vs_filter_hits.py \
   -i virtual_screening/VS_prediction_test_data_fingerprints_20260328_213415.csv \
   --min-sum 2 \
   --min-score 0.8 
@@ -21,7 +21,7 @@ import pandas as pd
 def parse_args():
     parser = argparse.ArgumentParser(description="Keep only molecules supported by enough models")
     parser.add_argument("--input", "-i", type=Path, required=True,
-                        help="Prediction CSV produced by Scripts/predict_qsar_models.py")
+                        help="Prediction CSV produced by Scripts/step21_vs_inference.py")
     parser.add_argument("--min-sum", type=int, default=1,
                         help="Minimum number of models that must vote positive (>=1)")
     parser.add_argument("--min-score", type=float, default=None,

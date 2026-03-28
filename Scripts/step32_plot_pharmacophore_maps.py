@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Visualize exported PyTorch attributions/joint contributions.
 Usage:
-python Scripts/visualize_exported_contributions.py \
+python Scripts/step32_plot_pharmacophore_maps.py \
   -i models_out/classification_20260326_164025/split_seed_3/exports/MLP/seed_42/pytorch_shap_export.npz \
   -o models_out/classification_20260326_164025/split_seed_3/shap/MLP/  \
   -m MLP \
@@ -10,7 +10,7 @@ python Scripts/visualize_exported_contributions.py \
   --heatmap-samples 50
 
 Optional GAT mode example:
-python Scripts/visualize_exported_contributions.py \
+python Scripts/step32_plot_pharmacophore_maps.py \
   -i models_out/classification_20260326_180529/split_seed_3/exports/GAT/seed_42/pytorch_shap_export.npz \
   -m GAT \
   -s 42 \
@@ -18,7 +18,7 @@ python Scripts/visualize_exported_contributions.py \
   --gat-max-molecules 16 \
   --gat-image-size 600
 
-python Scripts/visualize_exported_contributions.py \
+python Scripts/step32_plot_pharmacophore_maps.py \
   -i models_out/classification_20260326_213228/split_seed_3/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
   -m ChemBERTa \
   -s 42 \

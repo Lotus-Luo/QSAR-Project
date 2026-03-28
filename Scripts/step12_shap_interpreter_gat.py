@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GAT SHAP runner: compute per-atom attributions and apply global scaling.
 Usage:
-python Scripts/run_gat_shap_runner.py \
+python Scripts/step12_shap_interpreter_gat.py \
   -p models_out/classification_20260326_180529/split_seed_3 \
   -m GAT \
   -s 42 \
@@ -25,7 +25,7 @@ import sys
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from Scripts.qsar_modeling_pytorch import GATModel, GAT_NUM_EDGE_FEATURES, GAT_NUM_NODE_FEATURES
+from Scripts.step01_train_qsar_models import GATModel, GAT_NUM_EDGE_FEATURES, GAT_NUM_NODE_FEATURES
 
 DEFAULT_CONFIG_PATH = REPO_ROOT / "Shap_config" / "shap_gat_runner_config.yaml"
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Export SHAP-style contributions for PyTorch models trained by the QSAR pipeline.
 Usage:
-python Scripts/export_pytorch_contributions.py \
+python Scripts/step11_extract_contributions.py \
   -p models_out/classification_20260326_180529/split_seed_3 \
   -m GAT \
   -s 42 \
   --background-size 50
 
-python Scripts/export_pytorch_contributions.py \
+python Scripts/step11_extract_contributions.py \
   -p models_out/classification_20260326_213228/split_seed_3 \
   -m ChemBERTa \
   -s 42
@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from Scripts.qsar_modeling_pytorch import (
+from Scripts.step01_train_qsar_models import (
     ResidualMLP,
     DEVICE,
     GATModel,

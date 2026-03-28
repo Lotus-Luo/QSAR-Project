@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run SHAP explanations for full-development models on the External Test Set.
 Usage:
-    python Scripts/external_shap_analysis.py \
+    python Scripts/step14_compare_external_shap.py \
     -p models_out/classification_20260326_164025/split_seed_3 \
     -m SVC \
     -s 42 \

@@ -6,7 +6,7 @@ their SHAP contributions, and renders a Times New Roman bar plot showing each
 pattern’s average effect (positive values increase activity; negative values
 decrease it).
 
-python Scripts/gat_global_shap_summary.py \
+python Scripts/step15_summarize_global_features.py \
   --contributions models_out/classification_20260326_180529/split_seed_3/shap/GAT/seed_42/gat_atom_contributions.csv \
   --shap-export models_out/classification_20260326_180529/split_seed_3/exports/GAT/seed_42/pytorch_shap_export.npz \
   --output-dir models_out/classification_20260326_180529/split_seed_3/shap/GAT/seed_42/global_summary

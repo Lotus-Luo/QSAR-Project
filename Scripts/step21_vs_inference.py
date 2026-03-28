@@ -9,7 +9,7 @@ honors the original task (`classification` vs `regression`).
 
 Usage example:
 
-python Scripts/predict_qsar_models.py \
+python Scripts/step21_vs_inference.py \
      --run-dir models_out/classification_20260326_213228/split_seed_3 \
     --input Data/prediction_test_data_fingerprints.csv \
      --models "GAT,ChemBERTa,RFC,SVC" \
@@ -33,7 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-# Allow importing helpers from qsar_modeling_pytorch even though Scripts/
+# Allow importing helpers from step01_train_qsar_models even though Scripts/
 # is not a package.
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
@@ -52,7 +52,7 @@ try:
 except ImportError:  # pragma: no cover
     GeometricDataLoader = None
 
-from qsar_modeling_pytorch import (
+from step01_train_qsar_models import (
     GATModel,
     GAT_NUM_EDGE_FEATURES,
     GAT_NUM_NODE_FEATURES,
@@ -94,7 +94,7 @@ def parse_args():
     parser.add_argument("--input", "-i", required=True, type=Path,
                         help="CSV/Parquet file with id, smiles, and optional fingerprint columns")
     parser.add_argument("--output", "-o", type=Path,
-                        help="Prediction CSV path (default: run_dir/predictions/predictions_TIMESTAMP.csv)")
+                        help="Prediction CSV path (default: virtual_screening/<run>_<timestamp>.csv)")
     parser.add_argument("--models", help="Comma-separated subset of model names to predict with")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Batch size for DataLoader used by MLP/GAT/ChemBERTa")

@@ -67,7 +67,7 @@ def test_regression_nan_alignment_via_ids_mapping() -> None:
     # Use `rfr` because CLI uppercases model keys; registry uses `RFR` (not `Ridge`)
     cmd = [
         sys.executable,
-        str(REPO_DIR / "qsar_modeling_pytorch.py"),
+        str(REPO_DIR / "step01_train_qsar_models.py"),
         "-i",
         str(tmp_csv),
         "-l",
@@ -138,7 +138,7 @@ def test_regression_nan_alignment_via_ids_mapping() -> None:
 
 def test_calculate_metrics_single_class_does_not_crash() -> None:
     sys.path.insert(0, str(REPO_DIR))
-    import qsar_modeling_pytorch as qm
+    import step01_train_qsar_models as qm
 
     y_true = np.ones(10, dtype=int)
     y_proba = np.linspace(0.01, 0.99, 10, dtype=float)
@@ -157,7 +157,7 @@ def test_calculate_metrics_single_class_does_not_crash() -> None:
 
 def test_chembberta_empty_smiles_stability_no_crash() -> None:
     sys.path.insert(0, str(REPO_DIR))
-    import qsar_modeling_pytorch as qm
+    import step01_train_qsar_models as qm
 
     class EmptySMILESDataset(Dataset):
         def __init__(self, length: int = 4):
@@ -224,4 +224,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

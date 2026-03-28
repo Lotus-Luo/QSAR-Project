@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute ChemBERTa token-level SHAP/IG contributions.
 
-python Scripts/run_chemberta_shap_runner.py \
+python Scripts/step13_shap_interpreter_chemberta.py \
   -p models_out/classification_<timestamp>/split_seed_<k> \
   -m ChemBERTa \
   -s 42 \
@@ -10,7 +10,7 @@ python Scripts/run_chemberta_shap_runner.py \
   --max-samples 64 \
   --n-steps 32
 
-python Scripts/run_chemberta_shap_runner.py \
+python Scripts/step13_shap_interpreter_chemberta.py \
   -p models_out/classification_20260326_213228/split_seed_3 \
   -m ChemBERTa \
   -s 42 \
@@ -42,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from Scripts.qsar_modeling_pytorch import CHEMBERTA_AVAILABLE
+from Scripts.step01_train_qsar_models import CHEMBERTA_AVAILABLE
 
 
 def _ensure_transformers():

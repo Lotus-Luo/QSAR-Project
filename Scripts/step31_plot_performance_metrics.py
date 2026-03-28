@@ -2,7 +2,7 @@
 Aggregate split-seed metrics and predictions for publication-ready figures.
 
 Usage:
-    python visualize.py \
+    python Scripts/step31_plot_performance_metrics.py \
   --base-dir models_out/classification_20260325_141059 \
   --include-external \
   --include-cv \

@@ -1,7 +1,7 @@
 # ==============================================================================
 # Conda Environment Configuration for QSAR Modeling Pipeline
 # ==============================================================================
-# This environment file contains all dependencies required to run qsar_modeling_pytorch.py
+# This environment file contains all dependencies required to run step01_train_qsar_models.py
 # 
 # Usage:
 #   conda env create -f environment.yml
@@ -100,7 +100,7 @@ dependencies:
 # ==============================================================================
 # Notes
 # ==============================================================================
-# 1. This environment supports all models available in qsar_modeling_pytorch.py:
+# 1. This environment supports all models available in step01_train_qsar_models.py:
 #    - Traditional ML: LR, RFC, SVC, XGBC, LGBMC, ETC, Ridge, RFR, ETR
 #    - Deep Learning: MLP, GAT, ChemBERTa
 #

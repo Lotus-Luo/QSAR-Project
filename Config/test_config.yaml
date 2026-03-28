@@ -1,8 +1,8 @@
 # Usage:
-# python ./Scripts/qsar_modeling_pytorch.py -c Config/test_config.yaml
+# python ./Scripts/step01_train_qsar_models.py -c Config/test_config.yaml
 
 # QSAR Modeling Configuration File
-# This configuration file is used for testing qsar_modeling_pytorch.py
+# This configuration file is used for testing step01_train_qsar_models.py
 # Modify the parameters below to customize your modeling pipeline
 
 # Basic Configuration
