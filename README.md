@@ -14,7 +14,7 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
    python Scripts/step01_train_qsar_models.py -c Config/test_config.yaml
    ```
 4. **Inspect `models_out/{task}_{timestamp}`** for logs, results, predictions, saved models, and fingerprint/scaler processors.
-5. **Pretrained models download**: https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link
+5. [**Pretrained models download**](https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link)
 
 ## Scripts by stage
 
@@ -61,4 +61,6 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 
 ## License & contact
 
-Academic/research use only. Questions? Contact Toby Lo.
+**Academic research use only.**
+If any quesion, contact TobyLo.
+luooo8961@gmail.com
