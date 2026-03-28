@@ -47,6 +47,13 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 
 - Run `Scripts/step21_vs_inference.py` on a new compound list to create the wide prediction table (saved under `./virtual_screening/` by default), then prune with `Scripts/step22_vs_filter_hits.py --min-sum <N> [--min-score 0.7]` to shortlist high-confidence candidates.
 
+## Typical training & inference flow
+
+1. **Training (Stage 1)** – run `python Scripts/step01_train_qsar_models.py -c Config/test_config.yaml` or supply CLI overrides to produce `models_out/{task}_{timestamp}/split_seed_<k>/`.
+2. **Smoke validation** – `python Scripts/step02_run_smoke_test.py` quickly checks NaN handling and prediction exports.
+3. **Virtual screening (Stage 3)** – `python Scripts/step21_vs_inference.py --run-dir models_out/.../split_seed_<k> --input <compounds.csv>` writes `virtual_screening/<run>_<ts>.csv`; then filter via `python Scripts/step22_vs_filter_hits.py --input virtual_screening/... --min-sum 2 [--min-score 0.7]`.
+4. **SHAP interpretation (Stage 2)** – export tensors with `step11`, run `step12`/`step13`/`step14` for your chosen model/seed, and aggregate/visualize via `step15` and `step32` to explain the filtered hits.
+
 ## Outputs & metrics
 
 - **Outputs**: `models_out/.../results/` (metrics), `predictions/`, `models/`, `feature_processors/`, `exports/`, and `shape/` (SHAP artifacts + figures).  
@@ -57,7 +64,6 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 
 - Default split is scaffold to prevent scaffold leakage; switch via `--split-method` or `--cv-split-method` as needed.  
 - SHAP helpers reuse the exported fingerprints/pytorch tensors; visualizers trust the Runner’s global Max-Abs scaling so no further normalization is applied.  
-- All figures (ROC/PR, similarity maps, ChemBERTa heatmaps, bar summaries) follow the Times New Roman + `RdBu_r` palette mandated in this flow.
 
 ## License & contact
 
