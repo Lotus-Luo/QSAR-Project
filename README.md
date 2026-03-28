@@ -14,6 +14,7 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
    python Scripts/qsar_modeling_pytorch.py -c Config/test_config.yaml
    ```
 4. **Inspect `models_out/{task}_{timestamp}`** for logs, results, predictions, saved models, and fingerprint/scaler processors.
+5. **Pretrained models download**: https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link
 
 ## Core scripts
 
