@@ -1,6 +1,9 @@
 # Usage:
 # python ./Scripts/step01_train_qsar_models.py -c Config/test_config.yaml
 
+save_train_features: true
+# models_out/.../data/train_features.npz is created for the AD module.
+
 # QSAR Modeling Configuration File
 # This configuration file is used for testing step01_train_qsar_models.py
 # Modify the parameters below to customize your modeling pipeline

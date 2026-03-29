@@ -242,6 +242,7 @@ class QSARConfig:
     early_stopping_patience: int = 10
     config_file: str = ""
     split_seeds: List[int] = field(default_factory=lambda: [42])
+    save_train_features: bool = False  # Whether to persist Development-set features/labels for downstream AD scripts
     
     # Early enrichment settings
     ef_percentile: float = 1.0  # EF1%
@@ -3253,6 +3254,25 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             if X_ext_test is not None:
                 X_ext_test_filtered = X_ext_test
 
+        if getattr(config, "save_train_features", False):
+            train_dir = out_dir / "data"
+            train_dir.mkdir(parents=True, exist_ok=True)
+            features_to_save = X_dev_filtered if X_dev_filtered is not None else X_dev
+            if features_to_save is not None:
+                ids_arr = np.array(ids_dev, dtype=object) if ids_dev else np.array([], dtype=object)
+                smiles_arr = np.array(smiles_dev, dtype=object) if smiles_dev else np.array([], dtype=object)
+                train_features_path = train_dir / "train_features.npz"
+                np.savez_compressed(
+                    train_features_path,
+                    features=np.asarray(features_to_save, dtype=float),
+                    labels=np.asarray(y_dev, dtype=float),
+                    ids=ids_arr,
+                    smiles=smiles_arr,
+                )
+                logger.info(f"Saved Development features for AD: {train_features_path}")
+            else:
+                logger.warning("Could not export Development features for AD because the feature matrix is missing")
+
         # Persist External Test Set split for downstream SHAP analysis
         split_data_dir = out_dir / "data" / "splits"
         split_data_dir.mkdir(parents=True, exist_ok=True)
@@ -4604,6 +4624,8 @@ External Test Set Evaluation:
     parser.add_argument('--tune-iter', type=int, help='Max number of candidate settings to evaluate during Stage 2 tuning')
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help='Logging level (default: INFO)')
+    parser.add_argument('--save-train-features', action='store_true',
+                       help='Serialize Development-set features/labels to models_out/.../data/train_features.npz for AD analysis')
     
     args = parser.parse_args()
     
@@ -4656,6 +4678,8 @@ External Test Set Evaluation:
                 config.cv_tune_metric = args.cv_tune_metric
             if args.tune_iter is not None:
                 config.tune_iter = args.tune_iter
+        if args.save_train_features:
+            config.save_train_features = True
         
         config.config_file = str(args.config)
     
@@ -4700,7 +4724,8 @@ External Test Set Evaluation:
             auto_generate_fingerprints=not args.no_auto_fp if hasattr(args, 'no_auto_fp') else True,
             fingerprint_types=[fp.strip() for fp in args.fp_types.split(',')] if hasattr(args, 'fp_types') and args.fp_types else ['morgan'],
             save_cv_details=args.save_cv_details,
-            run_cv_stage2=not args.skip_cv_stage2
+            run_cv_stage2=not args.skip_cv_stage2,
+            save_train_features=args.save_train_features,
         )
         if args.tune_stage2:
             config.tune = True

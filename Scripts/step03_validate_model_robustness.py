@@ -3,10 +3,10 @@
 
 Usage:
     python Scripts/step03_validate_model_robustness.py \
-        -p models_out/classification_20260329_165120/split_seed_29 \
+        -p models_out/classification_20260329_221753/split_seed_29 \
         -m RFC \
         -s 42 \
-        --data models_out/classification_20260329_165120/split_seed_29/data/splits/external_test.npz \
+        --data models_out/classification_20260329_221753/split_seed_29/data/splits/external_test.npz \
         --n-permutations 100 \
         --task classification
 
