@@ -29,6 +29,7 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 - `Scripts/step13_shap_interpreter_chemberta.py`: LayerIntegratedGradients over ChemBERTa embeddings to generate token contributions, offsets, and SMILES links for downstream heatmaps.
 - `Scripts/step14_compare_external_shap.py`: SHAP on the traditional classifiers (LR/RFC/SVC/XGBC/LGBMC/ETC/Ridge/RFR/ETR) that live under `models/full_dev/`; saves summary/heatmap figures and `feature_importance.csv`.
 - `Scripts/step15_summarize_global_features.py`: aggregates SMARTS-based patterns (benzene, amide, hydroxyl, etc.) by mean SHAP effect and draws a styled bar chart.
+- `Scripts/step04_applicability_domain.py`: evaluates the applicability domain via Williams plot, SOM occupancy, and Tanimoto similarity, adds `In_Domain` flags to the external predictions CSV, and exports AD summaries/plots under `models_out/validation/<model>/seed_<seed>`.
 - `Scripts/step32_plot_pharmacophore_maps.py`: loads `step11`/`step12`/`step13` exports to render SHAP summaries, heatmaps, and GAT/ChemBERTa similarity maps with the Times New Roman style.
 
 ### Stage 3 – Virtual screening pipeline
