@@ -2,13 +2,13 @@
 """Export SHAP-style contributions for PyTorch models trained by the QSAR pipeline.
 Usage:
 python Scripts/step11_extract_contributions.py \
-  -p models_out/classification_20260326_180529/split_seed_3 \
+  -p models_out/classification_20260329_165120/split_seed_29 \
   -m GAT \
   -s 42 \
   --background-size 50
 
 python Scripts/step11_extract_contributions.py \
-  -p models_out/classification_20260326_213228/split_seed_3 \
+  -p models_out/classification_20260329_165120/split_seed_29 \
   -m ChemBERTa \
   -s 42
 """

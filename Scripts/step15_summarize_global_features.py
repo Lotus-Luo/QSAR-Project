@@ -7,9 +7,9 @@ pattern’s average effect (positive values increase activity; negative values
 decrease it).
 
 python Scripts/step15_summarize_global_features.py \
-  --contributions models_out/classification_20260326_180529/split_seed_3/shap/GAT/seed_42/gat_atom_contributions.csv \
-  --shap-export models_out/classification_20260326_180529/split_seed_3/exports/GAT/seed_42/pytorch_shap_export.npz \
-  --output-dir models_out/classification_20260326_180529/split_seed_3/shap/GAT/seed_42/global_summary
+  --contributions models_out/classification_20260329_165120/split_seed_29/shap/GAT/seed_42/gat_atom_contributions.csv \
+  --shap-export models_out/classification_20260329_165120/split_seed_29/exports/GAT/seed_42/pytorch_shap_export.npz \
+  --output-dir models_out/classification_20260329_165120/split_seed_29/shap/GAT/seed_42/global_summary
 
 """
 

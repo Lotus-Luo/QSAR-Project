@@ -2,12 +2,13 @@
 """Run SHAP explanations for full-development models on the External Test Set.
 Usage:
     python Scripts/step14_compare_external_shap.py \
-    -p models_out/classification_20260326_164025/split_seed_3 \
-    -m SVC \
+    -p models_out/classification_20260329_165120/split_seed_29 \
+    -m RFC \
     -s 42 \
     --max-display 25 \
     --heatmap-samples 50
 
+    note: -m can be sklearn model keys (XGBC, SVC, LR)
     optional:
     --task overrides the task if metadata is missing.
     --external-data points to a custom .npz split.

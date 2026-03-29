@@ -3,7 +3,7 @@ Aggregate split-seed metrics and predictions for publication-ready figures.
 
 Usage:
     python Scripts/step31_plot_performance_metrics.py \
-  --base-dir models_out/classification_20260325_141059 \
+  --base-dir models_out/classification_20260329_165120 \
   --include-external \
   --include-cv \
   --boxplot-stage both

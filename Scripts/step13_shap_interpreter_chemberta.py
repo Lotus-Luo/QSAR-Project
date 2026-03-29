@@ -2,20 +2,11 @@
 """Compute ChemBERTa token-level SHAP/IG contributions.
 
 python Scripts/step13_shap_interpreter_chemberta.py \
-  -p models_out/classification_<timestamp>/split_seed_<k> \
+  -p models_out/classification_20260329_165120/split_seed_29 \
   -m ChemBERTa \
   -s 42 \
-  -e models_out/classification_<timestamp>/split_seed_<k>/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
-  -o models_out/classification_<timestamp>/split_seed_<k>/shape/ChemBERTa/seed_42 \
-  --max-samples 64 \
-  --n-steps 32
-
-python Scripts/step13_shap_interpreter_chemberta.py \
-  -p models_out/classification_20260326_213228/split_seed_3 \
-  -m ChemBERTa \
-  -s 42 \
-  -e models_out/classification_20260326_213228/split_seed_3/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
-  -o models_out/classification_20260326_213228/split_seed_3/shape/ChemBERTa/seed_42 \
+  -e models_out/classification_20260329_165120/split_seed_29/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
+  -o models_out/classification_20260329_165120/split_seed_29/shap/ChemBERTa/seed_42 \
   --max-samples 64 \
   --n-steps 32
 
