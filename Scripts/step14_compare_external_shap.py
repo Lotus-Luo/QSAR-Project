@@ -8,7 +8,7 @@ Usage:
     --max-display 25 \
     --heatmap-samples 50
 
-    note: -m can be sklearn model keys (XGBC, SVC, LR)
+    note: -m can be sklearn model keys (XGBC, SVC, LR, "RFC,ETC should be optimized",)
     optional:
     --task overrides the task if metadata is missing.
     --external-data points to a custom .npz split.
@@ -227,7 +227,25 @@ def main():
     shap_values, explainer = _create_explainer(model, X_sample, task)
     shap_array = _normalize_shap_values(shap_values, task)
 
-    mean_abs_shap = np.abs(shap_array).mean(axis=0)
+    shap_arr = np.asarray(shap_array)
+    if shap_arr.ndim == 0:
+        shap_arr = shap_arr.reshape(1, 1)
+
+    shap_proc = shap_arr
+    feature_axis = None
+    for axis, size in enumerate(shap_proc.shape):
+        if size == len(feature_names):
+            feature_axis = axis
+            break
+    if feature_axis is None:
+        feature_axis = shap_proc.ndim - 1
+
+    if feature_axis != shap_proc.ndim - 1:
+        shap_proc = np.moveaxis(shap_proc, feature_axis, -1)
+
+    flattened = shap_proc.reshape(-1, shap_proc.shape[-1])
+    importance_vals = np.abs(flattened).mean(axis=0)
+    mean_abs_shap = importance_vals.reshape(-1)
     importance_df = pd.DataFrame({
         'feature': feature_names,
         'importance': mean_abs_shap
@@ -251,8 +269,13 @@ def main():
     _save_fig(summary_fig, output_dir / "shap_summary")
 
     heatmap_samples = min(args.heatmap_samples, len(X_sample))
+    heatmap_vals = shap_proc
+    if heatmap_vals.ndim > 2:
+        reduce_axes = tuple(range(1, heatmap_vals.ndim - 1))
+        if reduce_axes:
+            heatmap_vals = heatmap_vals.mean(axis=reduce_axes)
     explanation = shap.Explanation(
-        values=shap_array[:heatmap_samples],
+        values=heatmap_vals[:heatmap_samples],
         base_values=base_value,
         data=X_sample.iloc[:heatmap_samples],
         feature_names=feature_names

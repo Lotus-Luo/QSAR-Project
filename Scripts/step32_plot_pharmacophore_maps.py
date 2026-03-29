@@ -2,8 +2,8 @@
 """Visualize exported PyTorch attributions/joint contributions.
 Usage:
 python Scripts/step32_plot_pharmacophore_maps.py \
-  -i models_out/classification_20260329_165120/split_seed_29/exports/MLP/seed_42/pytorch_shap_export.npz \
-  -o models_out/classification_20260329_165120/split_seed_29/shap/MLP/  \
+  -i models_out/classification_20260326_164025/split_seed_3/exports/MLP/seed_42/pytorch_shap_export.npz \
+  -o models_out/classification_20260326_164025/split_seed_3/shap/MLP/  \
   -m MLP \
   -s 42 \
   --max-display 25  \
@@ -11,23 +11,24 @@ python Scripts/step32_plot_pharmacophore_maps.py \
 
 Optional GAT mode example:
 python Scripts/step32_plot_pharmacophore_maps.py \
-  -i models_out/classification_20260326_180529/split_seed_3/exports/GAT/seed_42/pytorch_shap_export.npz \
+  -i models_out/classification_20260329_165120/split_seed_29/exports/GAT/seed_42/pytorch_shap_export.npz \
   -m GAT \
   -s 42 \
-  --gat-contributions models_out/classification_20260326_180529/split_seed_3/shap/GAT/seed_42/gat_atom_contributions.csv \
+  --gat-contributions models_out/classification_20260329_165120/split_seed_29/shap/GAT/seed_42/gat_atom_contributions.csv \
   --gat-max-molecules 16 \
-  --gat-image-size 600
+  --gat-image-size 600 \
+  --o models_out/classification_20260329_165120/split_seed_29/shap/GAT/seed_42/figures
 
 python Scripts/step32_plot_pharmacophore_maps.py \
-  -i models_out/classification_20260326_213228/split_seed_3/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
+  -i models_out/classification_20260329_165120/split_seed_29/exports/ChemBERTa/seed_42/pytorch_shap_export.npz \
   -m ChemBERTa \
   -s 42 \
-  --chemberta-token-contributions models_out/classification_20260326_213228/split_seed_3/shape/ChemBERTa/seed_42/chemberta_token_contributions.npz \
+  --chemberta-token-contributions models_out/classification_20260329_165120/split_seed_29/shap/ChemBERTa/seed_42/chemberta_token_contributions.npz \
   --heatmap-samples 64 \
-  --output-dir models_out/classification_20260326_213228/split_seed_3/shape/ChemBERTa/seed_42/figures
+  --output-dir models_out/classification_20260329_165120/split_seed_29/shap/ChemBERTa/seed_42/figures
 
 
---o ./model_out/classificationXXX/split_seed_x/shape/<model>/seed_y (defualt)
+--o ./model_out/classificationXXX/split_seed_x/shap/<model>/seed_y (defualt)
 """
 
 import argparse
