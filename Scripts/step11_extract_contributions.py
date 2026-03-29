@@ -11,6 +11,12 @@ python Scripts/step11_extract_contributions.py \
   -p models_out/classification_20260329_165120/split_seed_29 \
   -m ChemBERTa \
   -s 42
+
+python Scripts/step11_extract_contributions.py \
+  -p models_out/classification_20260329_165120/split_seed_29 \
+  -m MLP \
+  -s 42 \
+  --background-size 50
 """
 
 import argparse
