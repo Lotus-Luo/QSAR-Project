@@ -1,6 +1,6 @@
 # QSAR Modeling with PyTorch Deep Learning
 
-Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models, exports SHAP-ready artifacts, and visualizes contributions with a consistent Times New Roman + `RdBu_r` style.
+Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models, exports SHAP-ready artifacts, and visualizes contributions.
 
 ## Quick steps
 
@@ -14,13 +14,14 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
    python Scripts/step01_train_qsar_models.py -c Config/test_config.yaml
    ```
 4. **Inspect `models_out/{task}_{timestamp}`** for logs, results, predictions, saved models, and fingerprint/scaler processors.
-5. [**Pretrained models download**](https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link)
+5. [**Pretrained models download(ChemBERT from Huggingface)**](https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link)
 
 ## Scripts by stage
 
 ### Stage 1 – Core Modeling
 - `Scripts/step01_train_qsar_models.py`: entry point for single-split or two-stage CV training of LR/RFC/SVC/XGBC/LGBMC/ETC, MLP, GAT, and ChemBERTa models.
 - `Scripts/step02_run_smoke_test.py`: lightweight regression/classification sanity checks covering NaNs, metrics, and ChemBERTa loader stability.
+- `Scripts/step03_validate_model_robustness.py`: once the best model is identified, run this Y-scrambling / permutation test to show the actual metric (AUC / R²) stands apart from random-label re-fits; it saves histogram/scatter figures and statistics under `models_out/validation/<model>/seed_<seed>`.
 
 ### Stage 2 – Model interpretation / SHAP workflows
 - `Scripts/step11_extract_contributions.py`: exports SHAP-style tensors (fingerprints, GAT node features, ChemBERTa tokens) for every PyTorch model (MLP, GAT, ChemBERTa) so the visualizers have consistent inputs.
@@ -60,7 +61,7 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 
 - **Outputs**: `models_out/.../results/` (metrics), `predictions/`, `models/`, `feature_processors/`, `exports/`, and `shape/` (SHAP artifacts + figures).  
 - **Metrics**: classification (AUC, PR-AUC, MCC, ACC, F1, EF1%, Hit Rate); regression (R², RMSE, MAE).  
-- **Validation**: single split for fast iteration, two-stage (external + K-fold CV) for publication-ready evaluation, optional multi-seed (`--seeds 42,123,2025`).
+- **Validation**: single split for fast iteration, two-stage (external + K-fold CV) for publication-ready evaluation, optional multi-seed (`--seeds 3,29,2026`).
 
 ## Notes
 
@@ -70,5 +71,5 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 ## License & contact
 
 **Academic research use only.**
-If any quesion, contact TobyLo.
+If any quesion, contact TobyLo.  
 luooo8961@gmail.com
