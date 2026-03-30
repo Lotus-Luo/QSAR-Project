@@ -1,4 +1,4 @@
-# QSAR Modeling with Multi Models Machine Learning
+# QSAR Modeling with Multi Models Machine(Deep) Learning
 
 Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models, exports SHAP-ready artifacts, and visualizes contributions.
 
@@ -15,6 +15,9 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
    ```
 4. **Inspect `models_out/{task}_{timestamp}`** for logs, results, predictions, saved models, and fingerprint/scaler processors.
 5. [**Pretrained models download(ChemBERT from Huggingface)**](https://drive.google.com/drive/folders/1sYv695rq7FSW5fiH6dIScCWBZDLmmtni?usp=drive_link)
+
+## Stage 0 – ChEMBL preparation
+- `Scripts/step00_process_chembl_raw.py`: merge `Data/NSD2/NSD2_chembl_act_2124.csv` with `Data/NSD2/NSD2_chembl_com_1265.csv`, filter IC50 (nM) datapoints, compute pIC50, canonicalize SMILES (salt stripping + largest fragment), deduplicate, label actives/inactives (default threshold pIC50 >= 6), and emit `Data/NSD2/NSD2_cleaned_final.csv`, `EDA_summary`, and `process_log.txt` for downstream modeling + AD analyses.
 
 ## Scripts by stage
 

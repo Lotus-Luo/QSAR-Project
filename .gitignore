@@ -32,3 +32,9 @@ Script/smoke_test_qsar_modeling_pytorch.py
 
 # 忽略原始冗余的README文件
 README_original.md
+
+# ignore data processing scripts
+Scripts/step00_data_clean.ipynb
+
+# ugnore my environment installation instructions
+Environment/env_install_suse.txt
