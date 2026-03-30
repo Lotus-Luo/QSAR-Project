@@ -14,6 +14,9 @@ problem.txt
 # 忽略大型数据文件（如果你的数据集很大，建议忽略）
 *.csv
 *.sdf
+*.png
+*.svg
+*.jpg
 
 # 忽略所有预训练模型文件
 pretrained_model/
