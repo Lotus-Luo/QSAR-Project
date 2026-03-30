@@ -1601,6 +1601,117 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
     
     return registry
 
+# --------- Internal Helpers ---------
+def _prepare_pytorch_optimizer_scheduler(model, config: QSARConfig, model_type: str, logger: logging.Logger):
+    if model_type == "transformer":
+        base_lr = 5e-5
+        wt_decay = 0.01
+        min_lr = 1e-7
+        optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=wt_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config.max_epochs,
+            eta_min=min_lr,
+        )
+        logger.info("ChemBERTa training strategy:")
+        logger.info(f"  - Optimizer: {type(optimizer).__name__} (lr={optimizer.param_groups[0]['lr']:.1e}, weight_decay={optimizer.param_groups[0]['weight_decay']})")
+        logger.info(f"  - Scheduler: {type(scheduler).__name__} (T_max={scheduler.T_max}, eta_min={scheduler.eta_min:.1e})")
+        logger.info("  - Fine-tuning: Full parameter fine-tuning (no frozen layers)")
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=1e-5)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    return optimizer, scheduler
+
+
+def _pytorch_batch_forward(batch, model, criterion, task: str, device):
+    if isinstance(batch, Data):
+        batch = batch.to(device)
+        labels = batch.y
+        outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
+    elif isinstance(batch, (list, tuple)) and len(batch) == 2:
+        inputs, labels = batch
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+        outputs = model(inputs).squeeze(-1)
+    else:
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['label'].to(device)
+        if input_ids.size(0) == 0:
+            return None, None, None, True
+        outputs = model(input_ids, attention_mask)
+    loss = criterion(outputs, labels)
+    return loss, outputs, labels, False
+
+
+def _pytorch_batch_predict(batch, model, task: str, device):
+    if isinstance(batch, Data):
+        batch = batch.to(device)
+        outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
+    elif isinstance(batch, (list, tuple)) and len(batch) == 2:
+        inputs, _ = batch
+        outputs = model(inputs.to(device)).squeeze(-1)
+    else:
+        input_ids = batch['input_ids'].to(device)
+        if input_ids.size(0) == 0:
+            return None
+        attention_mask = batch['attention_mask'].to(device)
+        outputs = model(input_ids, attention_mask)
+    return outputs
+
+
+def _filter_features(X: np.ndarray, config: QSARConfig, logger: logging.Logger = None):
+    from sklearn.feature_selection import VarianceThreshold
+
+    X_filtered = X.copy()
+    feature_mask = np.ones(X.shape[1], dtype=bool)
+    selector = None
+
+    if config.min_frequency > 0 and np.all(np.isin(X, [0, 1])):
+        n_samples = X.shape[0]
+        min_count = int(n_samples * config.min_frequency)
+        feature_counts = np.sum(X, axis=0)
+        feature_mask = (feature_counts >= min_count) & (feature_counts <= n_samples - min_count)
+        X_filtered = X_filtered[:, feature_mask]
+        if logger:
+            logger.info(
+                f"  Feature filtering (frequency): {X.shape[1]} → {X_filtered.shape[1]} features (min_frequency={config.min_frequency*100:.1f}%)"
+            )
+    elif config.variance_threshold > 0:
+        selector = VarianceThreshold(threshold=config.variance_threshold)
+        X_filtered = selector.fit_transform(X_filtered)
+        feature_mask = selector.get_support()
+        if logger:
+            logger.info(
+                f"  Feature filtering (variance): {X.shape[1]} → {X_filtered.shape[1]} features (threshold={config.variance_threshold})"
+            )
+    else:
+        if logger:
+            logger.info("  Feature filtering: skipped")
+
+    return X_filtered, feature_mask, selector
+
+
+def _inject_random_state(params: Dict[str, Any], model_cls, rs: int, model_key: str, logger: logging.Logger = None):
+    params = dict(params or {})
+    if model_key == 'XGBC' or getattr(model_cls, '__name__', '') == 'XGBClassifier':
+        if params.get('random_state') is None:
+            params['random_state'] = rs
+        if params.get('seed') is None:
+            params['seed'] = rs
+        if logger:
+            logger.debug(f"{model_key}: injecting XGBoost seeds random_state={rs}, seed={rs}")
+    else:
+        try:
+            sig = inspect.signature(model_cls.__init__)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is not None and 'random_state' in sig.parameters and params.get('random_state') is None:
+            params['random_state'] = rs
+            if logger:
+                logger.debug(f"{model_key}: injecting random_state={rs} (sklearn estimators need it)")
+    return params
+
 # --------- Training Functions ---------
 def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig, 
                        task: str = "classification", logger: logging.Logger = None,
@@ -1626,115 +1737,51 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     
     device = DEVICE
     model = model.to(device)
-    
-    # ========== Model-specific Training Strategies ==========
-    # For ChemBERTa transformer models, use specialized hyperparameters and optimizer
-    if model_type == "transformer":
-        # AdamW optimizer with weight decay (standard for transformer fine-tuning)
-        base_lr = 5e-5
-        wt_decay = 0.01
-        min_lr = 1e-7
-        optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=wt_decay)
-        
-        # Cosine Annealing Learning Rate scheduler
-        # Gradually reduces learning rate following a cosine curve
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, 
-            T_max=config.max_epochs,  # Number of iterations for the cosine cycle
-            eta_min=min_lr  # Minimum learning rate
-        )
-        
-        logger.info("ChemBERTa training strategy:")
-        current_lr = optimizer.param_groups[0]['lr']
-        current_wd = optimizer.param_groups[0]['weight_decay']
-        logger.info(f"  - Optimizer: {type(optimizer).__name__} (lr={current_lr:.1e}, weight_decay={current_wd})")
-        logger.info(f"  - Scheduler: {type(scheduler).__name__} (T_max={scheduler.T_max}, eta_min={scheduler.eta_min:.1e})")
-        logger.info("  - Fine-tuning: Full parameter fine-tuning (no frozen layers)")
-    else:
-        # Default strategy for other deep learning models (MLP, GAT)
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    
-    # Loss function
-    # Use BCEWithLogitsLoss for classification for better numerical stability
-    # This combines sigmoid and BCE in a single function for improved stability
+    optimizer, scheduler = _prepare_pytorch_optimizer_scheduler(model, config, model_type, logger)
+
     if task == "classification":
         criterion = nn.BCEWithLogitsLoss()
     else:
         criterion = nn.MSELoss()
-    
-    # Early stopping
+
     best_val_loss = float('inf')
     patience_counter = 0
     best_model_state = None
     best_epoch = 0
-    
-    # Training loop with epoch-wise tracking
+
     for epoch in range(config.max_epochs):
-        # Training
         model.train()
         train_loss = 0.0
         num_train_batches_processed = 0
-        
-        # Progress bar for training
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Train]", 
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Train]",
                     leave=False, disable=logger is None)
-        
+
         for batch in pbar:
-            # Handle different batch formats
-            if isinstance(batch, Data):  # GAT - Batch object (Data subclass) with y attribute
-                batch = batch.to(device)
-                labels = batch.y
-                optimizer.zero_grad()
-                outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
-                loss = criterion(outputs, labels)
-            elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
-                inputs, labels = batch
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(inputs).squeeze(-1)
-                loss = criterion(outputs, labels)
-            else:  # ChemBERTa (transformer)
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['label'].to(device)
-                # Skip fully-empty collated batches (e.g., when all SMILES were empty)
-                if input_ids.size(0) == 0:
-                    continue
-                optimizer.zero_grad()
-                outputs = model(input_ids, attention_mask)
-                loss = criterion(outputs, labels)
-            
+            optimizer.zero_grad()
+            loss, outputs, labels, skip = _pytorch_batch_forward(batch, model, criterion, task, device)
+            if skip:
+                continue
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
             num_train_batches_processed += 1
-            
-            # Update progress bar
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-        
+
         pbar.close()
         if num_train_batches_processed == 0:
             logger.warning("No non-empty batches processed during training; aborting training loop.")
             break
         train_loss /= num_train_batches_processed
 
-        # Clear GPU cache after each epoch to prevent OOM, especially for transformer models
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Validation (skip if val_loader is None)
         if val_loader is None:
-            # No validation set - use training loss as proxy
             val_loss = train_loss
             logger.info(f"Epoch {epoch+1}/{config.max_epochs} - Train Loss: {train_loss:.4f} (No validation set)")
-            
-            # Update scheduler based on epoch (for CosineAnnealingLR)
             if model_type == "transformer":
                 scheduler.step()
-            
-            # No validation set - save best model based on training loss
             if train_loss < best_val_loss:
                 best_val_loss = train_loss
                 patience_counter = 0
@@ -1746,58 +1793,31 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
             all_preds = []
             all_labels = []
             num_val_batches_processed = 0
-            
+
             with torch.no_grad():
-                # Progress bar for validation
-                pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Val]", 
-                              leave=False, disable=logger is None)
-                
+                pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Val]",
+                                leave=False, disable=logger is None)
+
                 for batch in pbar_val:
-                    if isinstance(batch, Data):  # GAT - Batch object (Data subclass) with y attribute
-                        batch = batch.to(device)
-                        labels = batch.y
-                        outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
-                        loss = criterion(outputs, labels)
-                    elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
-                        inputs, labels = batch
-                        inputs = inputs.to(device)
-                        labels = labels.to(device)
-                        outputs = model(inputs).squeeze(-1)
-                        loss = criterion(outputs, labels)
-                    else:  # ChemBERTa (transformer)
-                        input_ids = batch['input_ids'].to(device)
-                        attention_mask = batch['attention_mask'].to(device)
-                        labels = batch['label'].to(device)
-                        # Skip fully-empty collated batches
-                        if input_ids.size(0) == 0:
-                            continue
-                        outputs = model(input_ids, attention_mask)
-                        loss = criterion(outputs, labels)
-                    
+                    loss, outputs, labels, skip = _pytorch_batch_forward(batch, model, criterion, task, device)
+                    if skip:
+                        continue
                     val_loss += loss.item()
                     num_val_batches_processed += 1
-                    
-                    # Collect predictions
                     all_preds.extend(outputs.cpu().numpy())
                     all_labels.extend(labels.cpu().numpy())
-                    
-                    # Update progress bar
                     pbar_val.set_postfix({'loss': f'{loss.item():.4f}'})
-                
+
                 pbar_val.close()
-            
+
             if num_val_batches_processed == 0:
                 val_loss = float('inf')
             else:
                 val_loss /= num_val_batches_processed
-            
-            # Calculate validation metrics
+
             if task == "classification":
-                # Apply sigmoid to logits for metric calculation
                 val_preds_proba = torch.sigmoid(torch.tensor(all_preds)).numpy()
                 val_preds_binary = (val_preds_proba >= 0.5).astype(int)
-                
-                # Calculate comprehensive metrics
                 try:
                     val_auc = float(roc_auc_score(all_labels, val_preds_proba))
                 except Exception as e:
@@ -1809,8 +1829,6 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
                 except Exception as e:
                     logger.warning(f"  Val ACC computation failed ({e}); setting ACC=NaN")
                     val_acc = float('nan')
-                
-                # Log all key metrics for each epoch
                 logger.info(
                     f"Epoch {epoch+1}/{config.max_epochs} - "
                     f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
@@ -1822,7 +1840,23 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
                     f"Epoch {epoch+1}/{config.max_epochs} - "
                     f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val R2: {val_r2:.4f}"
                 )
-            
+
+            if model_type == "transformer":
+                scheduler.step()
+            else:
+                scheduler.step(val_loss)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_model_state = copy.deepcopy(model.state_dict())
+                best_epoch = epoch + 1
+            else:
+                patience_counter += 1
+                if patience_counter >= config.early_stopping_patience:
+                    logger.info(f"Early stopping at epoch {epoch+1}")
+                    break
+
             # Learning rate scheduling
             if model_type == "transformer":
                 # CosineAnnealingLR steps by epoch
@@ -1864,20 +1898,9 @@ def predict_pytorch_model(model, data_loader, task: str = "classification") -> T
     
     with torch.no_grad():
         for batch in data_loader:
-            if isinstance(batch, Data):  # GAT - Batch object (Data subclass)
-                batch = batch.to(device)
-                outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
-            elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
-                inputs, _ = batch
-                inputs = inputs.to(device)
-                outputs = model(inputs).squeeze(-1)
-            else:  # ChemBERTa
-                input_ids = batch['input_ids'].to(device)
-                if input_ids.size(0) == 0:
-                    continue
-                attention_mask = batch['attention_mask'].to(device)
-                outputs = model(input_ids, attention_mask)
-            
+            outputs = _pytorch_batch_predict(batch, model, task, device)
+            if outputs is None:
+                continue
             all_preds.extend(outputs.cpu().numpy())
     
     all_preds = np.array(all_preds)
@@ -1941,27 +1964,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             seeds = getattr(config, 'seeds', None) or []
             rs = seeds[0] if seeds else getattr(config, 'seed', 42)
 
-        # XGBoost: relying on inspect.signature may fail because sklearn wrapper can hide params
-        # behind **kwargs. Explicitly set both `random_state` and `seed` when training XGBC.
-        if model_key == 'XGBC' or getattr(model_cls, '__name__', '') == 'XGBClassifier':
-            if params.get('random_state') is None:
-                params['random_state'] = rs
-            if params.get('seed') is None:
-                params['seed'] = rs
-            if logger:
-                logger.debug(f"{model_key}: injecting XGBoost seeds random_state={rs}, seed={rs}")
-        else:
-            # Generic case: inject random_state when the estimator's __init__ exposes it.
-            try:
-                sig = inspect.signature(model_cls.__init__)
-            except (TypeError, ValueError):
-                sig = None
-
-            if sig is not None and 'random_state' in sig.parameters and params.get('random_state') is None:
-                params['random_state'] = rs
-                if logger:
-                    logger.debug(f"{model_key}: injecting random_state={rs} (sklearn estimators need it)")
-
+        params = _inject_random_state(params, model_cls, rs, model_key, logger)
         model = model_cls(**params)
         
         # Fit model
@@ -2575,57 +2578,17 @@ def apply_feature_processing(X_train, X_val, config: QSARConfig, logger: logging
     Returns:
         X_train_processed, X_val_processed, feature_mask, selector, scaler, feature_names_filtered
     """
-    from sklearn.feature_selection import VarianceThreshold
     from sklearn.preprocessing import StandardScaler
-    
+
     X_train_processed = X_train.copy()
-    X_val_processed = X_val.copy()
-    
-    # Step 1: Filter features (fitted on training data)
-    # For binary fingerprints (values 0/1), use frequency-based filtering
-    # For continuous features, use variance-based filtering
-    feature_mask = np.ones(X_train.shape[1], dtype=bool)
-    selector = None
-    
-    if config.min_frequency > 0 and np.all(np.isin(X_train, [0, 1])):
-        # Binary fingerprint filtering based on frequency
-        n_samples = X_train.shape[0]
-        min_count = int(n_samples * config.min_frequency)
-        
-        # Count occurrences of 1s in each feature
-        feature_counts = np.sum(X_train, axis=0)
-        
-        # Keep features that appear in at least min_frequency of samples
-        feature_mask = (feature_counts >= min_count) & (feature_counts <= n_samples - min_count)
-        
-        X_train_processed = X_train_processed[:, feature_mask]
-        X_val_processed = X_val_processed[:, feature_mask]
-        
-        if logger:
-            n_features_after = X_train_processed.shape[1]
-            logger.info(f"  Feature filtering (frequency): {X_train.shape[1]} → {n_features_after} features (min_frequency={config.min_frequency*100:.1f}%)")
-    
-    elif config.variance_threshold > 0:
-        # Variance-based filtering for continuous features
-        selector = VarianceThreshold(threshold=config.variance_threshold)
-        X_train_processed = selector.fit_transform(X_train_processed)
-        X_val_processed = selector.transform(X_val_processed)
-        feature_mask = selector.get_support()
-        
-        if logger:
-            n_features_after = X_train_processed.shape[1]
-            logger.info(f"  Feature filtering (variance): {X_train.shape[1]} → {n_features_after} features (threshold={config.variance_threshold})")
-    else:
-        if logger:
-            logger.info(f"  Feature filtering: skipped")
-    
-    # Filter feature names if provided
-    feature_names_filtered = None
-    if feature_names is not None:
-        feature_names_filtered = [name for name, keep in zip(feature_names, feature_mask) if keep]
-    
-    # Step 2: Standardize features (fitted on training data)
-    # Only standardize for gradient-based models, not tree-based models
+    X_val_processed = X_val.copy() if X_val is not None else None
+
+    X_train_processed, feature_mask, selector = _filter_features(X_train_processed, config, logger)
+    if X_val_processed is not None:
+        X_val_processed = X_val_processed[:, feature_mask] if selector is None else selector.transform(X_val_processed)
+
+    feature_names_filtered = [name for name, keep in zip(feature_names, feature_mask) if keep] if feature_names is not None else None
+
     scaler = None
     apply_standardization = False
     
@@ -2712,46 +2675,8 @@ def apply_global_feature_filtering(X: np.ndarray, config: QSARConfig, logger: lo
     Returns:
         X_filtered, feature_mask, feature_names_filtered
     """
-    from sklearn.feature_selection import VarianceThreshold
-    
-    X_filtered = X.copy()
-    feature_mask = np.ones(X.shape[1], dtype=bool)
-    
-    if config.min_frequency > 0 and np.all(np.isin(X, [0, 1])):
-        # Binary fingerprint filtering based on frequency
-        n_samples = X.shape[0]
-        min_count = int(n_samples * config.min_frequency)
-        
-        # Count occurrences of 1s in each feature
-        feature_counts = np.sum(X, axis=0)
-        
-        # Keep features that appear in at least min_frequency of samples
-        feature_mask = (feature_counts >= min_count) & (feature_counts <= n_samples - min_count)
-        
-        X_filtered = X_filtered[:, feature_mask]
-        
-        if logger:
-            n_features_after = X_filtered.shape[1]
-            logger.info(f"Global feature filtering (frequency): {X.shape[1]} → {n_features_after} features (min_frequency={config.min_frequency*100:.1f}%)")
-    
-    elif config.variance_threshold > 0:
-        # Variance-based filtering for continuous features
-        selector = VarianceThreshold(threshold=config.variance_threshold)
-        X_filtered = selector.fit_transform(X_filtered)
-        feature_mask = selector.get_support()
-        
-        if logger:
-            n_features_after = X_filtered.shape[1]
-            logger.info(f"Global feature filtering (variance): {X.shape[1]} → {n_features_after} features (threshold={config.variance_threshold})")
-    else:
-        if logger:
-            logger.info(f"Global feature filtering: skipped")
-    
-    # Filter feature names if provided
-    feature_names_filtered = None
-    if feature_names is not None:
-        feature_names_filtered = [name for name, keep in zip(feature_names, feature_mask) if keep]
-    
+    X_filtered, feature_mask, _ = _filter_features(X.copy(), config, logger)
+    feature_names_filtered = [name for name, keep in zip(feature_names, feature_mask) if keep] if feature_names is not None else None
     return X_filtered, feature_mask, feature_names_filtered
 
 
@@ -4239,8 +4164,6 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info(f"Results saved to: {out_dir / 'results' / 'summary_metrics.csv'} (mean ± std across seeds)")
     logger.info(f"{'='*60}")
     
-    # Note: Model saving and SHAP analysis are not implemented for k-fold CV unless
-    # `--save-cv-details` is set, which persists fold/seed artifacts under `cv_data/`.
     if not use_cv:
         # Find best models (separate for traditional and deep learning)
         # Check if results are already aggregated (contain _mean suffix)
@@ -4307,7 +4230,6 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         if config.save_cv_details:
             logger.info(f"\nDetailed CV artifacts saved under: {out_dir / 'cv_data'}")
         else:
-            logger.info("\nNote: Model saving and SHAP analysis are only available in single split mode (--folds 1)")
             logger.info("Use --save-cv-details to persist per-fold/seed artifacts for post-hoc SHAP analysis.")
     
     return result_payload

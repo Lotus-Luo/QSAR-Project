@@ -149,7 +149,7 @@ selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
 
 # Directory path for saving results and models
 # All output files will be saved here
-output_dir: "./Output/test_output"
+output_dir: "./models_out/"
 
 # ------------------------------------------------------------------------------
 # Feature Processing Configuration
