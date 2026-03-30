@@ -12,7 +12,7 @@ save_train_features: true
 # ------------------------------------------------------------------------------
 # Path to input CSV/Parquet file containing molecular data
 # The file must contain at least: id, smiles, and label/pic50 columns
-input_path: "./Data/test_data_complex_with_fingerprints.csv"
+input_path: "./Data/NSD2/NSD2_final_ic50_with_fingerprints.csv"
 
 # Column name for binary classification labels (0 or 1)
 # Used for classification tasks
@@ -74,7 +74,7 @@ seeds: [42]
 # Multiple random split seeds (Stage 1/2)
 # Each seed reruns the Dev/External split plus CV folds; outputs go under `split_seed_<seed>/`.
 # Aggregated summaries and row-level data appear in `results/all_split_*` and `results/all_split_row_data.csv`.
-split_seeds: [3, 29, 2026]
+split_seeds: [3, 30, 2026]
 
 # Method for splitting data into train/validation/test sets
 # Options:
@@ -149,7 +149,7 @@ selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
 
 # Directory path for saving results and models
 # All output files will be saved here
-output_dir: "./models_out/"
+output_dir: "./Output/test_output"
 
 # ------------------------------------------------------------------------------
 # Feature Processing Configuration
@@ -197,12 +197,12 @@ fingerprint_types: ["morgan"]
 
 # Maximum number of training epochs for deep learning models
 # Options: 10 to 500 (recommended: 50-200)
-max_epochs: 10
+max_epochs: 100
 
 # Batch size for training deep learning models
 # Options: 16, 32, 64, 128 (recommended: 32 for most cases)
 # Larger batches may require more GPU memory
-batch_size: 16
+batch_size: 64
 
 # Learning rate for deep learning model optimization
 # Options: 0.0001 to 0.01 (recommended: 0.001)
@@ -212,7 +212,7 @@ learning_rate: 0.001
 # Early stopping patience (number of epochs to wait before stopping)
 # Training stops if validation loss doesn't improve for this many epochs
 # Options: 5 to 20 (recommended: 10)
-early_stopping_patience: 5
+early_stopping_patience: 10
 
 # ------------------------------------------------------------------------------
 # Class imbalance & prediction thresholds

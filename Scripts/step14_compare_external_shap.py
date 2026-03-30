@@ -2,7 +2,7 @@
 """Run SHAP explanations for full-development models on the External Test Set.
 Usage:
     python Scripts/step14_compare_external_shap.py \
-    -p models_out/classification_20260329_165120/split_seed_29 \
+    -p models_out/classification_20260330_151751/split_seed_30 \
     -m RFC \
     -s 42 \
     --max-display 25 \

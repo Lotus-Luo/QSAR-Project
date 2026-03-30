@@ -2,8 +2,8 @@
 """Visualize exported PyTorch attributions/joint contributions.
 Usage:
 python Scripts/step32_plot_pharmacophore_maps.py \
-  -i models_out/classification_20260329_165120/split_seed_29/exports/MLP/seed_42/pytorch_shap_export.npz \
-  -o models_out/classification_20260329_165120/split_seed_29/shap/MLP/  \
+  -i models_out/classification_20260330_151751/split_seed_30/exports/MLP/seed_42/pytorch_shap_export.npz \
+  -o models_out/classification_20260330_151751/split_seed_30/shap/MLP/  \
   -m MLP \
   -s 42 \
   --max-display 25  \

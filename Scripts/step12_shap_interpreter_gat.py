@@ -2,11 +2,11 @@
 """GAT SHAP runner: compute per-atom attributions and apply global scaling.
 Usage:
 python Scripts/step12_shap_interpreter_gat.py \
-  -p models_out/classification_20260329_165120/split_seed_29 \
+  -p models_out/classification_20260330_151751/split_seed_30 \
   -m GAT \
   -s 42 \
-  -e models_out/classification_20260329_165120/split_seed_29/exports/GAT/seed_42/pytorch_shap_export.npz \
-  -o models_out/classification_20260329_165120/split_seed_29/shap/GAT/seed_42/
+  -e models_out/classification_20260330_151751/split_seed_30/exports/GAT/seed_42/pytorch_shap_export.npz \
+  -o models_out/classification_20260330_151751/split_seed_30/shap/GAT/seed_42/
 """
 
 import argparse
