@@ -3,11 +3,11 @@
 
 Usage:
     python Scripts/step03_validate_model_robustness.py \
-        -p models_out/classification_20260330_151751/split_seed_30 \
+        -p models_out/classification_20260330_212716/split_seed_30 \
         -m RFC \
         -s 42 \
-        --data models_out/classification_20260330_151751/split_seed_30/data/splits/external_test.npz \
-        --n-permutations 100 \
+        --data models_out/classification_20260330_212716/split_seed_30/data/splits/external_test.npz \
+        --n-permutations 5 \
         --task classification
 
 By default the script uses the metadata saved alongside the model to apply the same feature mask.

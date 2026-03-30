@@ -12,7 +12,7 @@ save_train_features: true
 # ------------------------------------------------------------------------------
 # Path to input CSV/Parquet file containing molecular data
 # The file must contain at least: id, smiles, and label/pic50 columns
-input_path: "./Data/NSD2/NSD2_final_ic50_with_fingerprints.csv"
+input_path: "./Data/test_data_complex_with_fingerprints.csv"
 
 # Column name for binary classification labels (0 or 1)
 # Used for classification tasks
@@ -149,7 +149,7 @@ selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
 
 # Directory path for saving results and models
 # All output files will be saved here
-output_dir: "./Output/test_output"
+output_dir: "./models_out"
 
 # ------------------------------------------------------------------------------
 # Feature Processing Configuration
@@ -197,12 +197,12 @@ fingerprint_types: ["morgan"]
 
 # Maximum number of training epochs for deep learning models
 # Options: 10 to 500 (recommended: 50-200)
-max_epochs: 100
+max_epochs: 5
 
 # Batch size for training deep learning models
 # Options: 16, 32, 64, 128 (recommended: 32 for most cases)
 # Larger batches may require more GPU memory
-batch_size: 64
+batch_size: 32
 
 # Learning rate for deep learning model optimization
 # Options: 0.0001 to 0.01 (recommended: 0.001)
@@ -212,14 +212,14 @@ learning_rate: 0.001
 # Early stopping patience (number of epochs to wait before stopping)
 # Training stops if validation loss doesn't improve for this many epochs
 # Options: 5 to 20 (recommended: 10)
-early_stopping_patience: 10
+early_stopping_patience: 5
 
 # ------------------------------------------------------------------------------
 # Class imbalance & prediction thresholds
 # ------------------------------------------------------------------------------
 # Decision threshold used for turning probabilities into labels (can be >0.5 for stricter positives)
 # Default (when omitted) is 0.5; increase to favor precision.
-classification_threshold: 0.6
+classification_threshold: 0.5
 
 # Traditional ML overrides for handling imbalanced classes (0≈29.1%, 1≈70.9%)
 # Use sklearn's class_weight or model-specific options like scale_pos_weight for XGBoost.

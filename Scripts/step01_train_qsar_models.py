@@ -2789,6 +2789,33 @@ def apply_global_feature_filtering(X: np.ndarray, config: QSARConfig, logger: lo
     return X_filtered, feature_mask, feature_names_filtered
 
 
+def prepare_features_for_model(model_key: str,
+                               X_train: Optional[np.ndarray],
+                               X_holdout: Optional[np.ndarray],
+                               logger: logging.Logger = None,
+                               prefix: str = "") -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Any]]:
+    """
+    Apply standardization for gradient-based models while skipping tree-based ones.
+    Returns standardized train/holdout matrices along with fitted scaler (if any).
+    """
+    if X_train is None:
+        return None, None, None
+
+    model_preprocessing_type = get_model_type(model_key)
+    if model_preprocessing_type != 'gradient_based':
+        if logger:
+            logger.info(f"{prefix}Standardization skipped for {model_key} (tree-based model)")
+        return X_train, X_holdout, None
+
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_holdout_scaled = scaler.transform(X_holdout) if X_holdout is not None else None
+    if logger:
+        logger.info(f"{prefix}Standardization applied for {model_key}")
+    return X_train_scaled, X_holdout_scaled, scaler
+
+
 # --------- Training Function for Single Split/Fold ---------
 def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                      smiles_train: Optional[List[str]] = None, smiles_val: Optional[List[str]] = None,
@@ -2874,7 +2901,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
         selector = fold_selector
         X_train_final = X_train_processed
         X_val_final = X_val_processed
-        
+
         # Determine if this is a traditional or deep learning model
         model_type_category = 'deep_learning' if model_config['type'] in ['pytorch', 'pytorch_geometric', 'transformer'] else 'traditional'
         
@@ -2882,41 +2909,25 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
         
         # Prepare data based on model type
         # Apply standardization only for models that need it (gradient-based)
-        if model_config['type'] in ['sklearn']:  # Traditional models
-            model_preprocessing_type = get_model_type(model_key)
-            if X_train_processed is not None and X_val_processed is not None:
-                if model_preprocessing_type == 'gradient_based':
-                    # Apply standardization for gradient-based models
-                    from sklearn.preprocessing import StandardScaler
-                    scaler = StandardScaler()
-                    X_train_final = scaler.fit_transform(X_train_processed)
-                    X_val_final = scaler.transform(X_val_processed)
-                    logger.info(f"{fold_prefix}Standardization applied for {model_key}")
-                else:
-                    # No standardization for tree-based models
-                    X_train_final = X_train_processed
-                    X_val_final = X_val_processed
-                    logger.info(f"{fold_prefix}Standardization skipped for {model_key} (tree-based model)")
+        if model_config['type'] in ['sklearn']:
+            if X_train_processed is not None:
+                X_train_final, X_val_final, scaler = prepare_features_for_model(
+                    model_key, X_train_processed, X_val_processed, logger, prefix=f"{fold_prefix}"
+                )
+            else:
+                X_train_final = None
+                X_val_final = None
+        elif model_config['type'] == 'pytorch':
+            if X_train_processed is not None:
+                X_train_final, X_val_final, scaler = prepare_features_for_model(
+                    model_key, X_train_processed, X_val_processed, logger, prefix=f"{fold_prefix}"
+                )
             else:
                 X_train_final = None
                 X_val_final = None
         else:
-            # Deep learning models (MLP, GAT, ChemBERTa)
-            # MLP uses fingerprint features, GAT and ChemBERTa use SMILES
-            if model_config['type'] == 'pytorch':  # MLP
-                # MLP needs standardization
-                if X_train_processed is not None and X_val_processed is not None:
-                    from sklearn.preprocessing import StandardScaler
-                    scaler = StandardScaler()
-                    X_train_final = scaler.fit_transform(X_train_processed)
-                    X_val_final = scaler.transform(X_val_processed)
-                    logger.info(f"{fold_prefix}Standardization applied for {model_key}")
-                else:
-                    X_train_final = None
-                    X_val_final = None
-            else:  # GAT, ChemBERTa (use SMILES, no feature processing needed)
-                X_train_final = None
-                X_val_final = None
+            X_train_final = None
+            X_val_final = None
         
         # Multi-seed training loop
         seed_results = []  # Store results for each seed
@@ -3720,42 +3731,21 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 set_all_seeds(seed, logger)
                 scaler = None
                 
-                # Prepare data based on model type
-                # Apply standardization only for models that need it (gradient-based)
-                if model_config['type'] in ['sklearn']:  # Traditional models
-                    model_preprocessing_type = get_model_type(model_key)
+                if model_config['type'] in ['sklearn', 'pytorch']:
                     if X_dev_for_ext_test is not None and X_ext_test_for_ext_test is not None:
-                        if model_preprocessing_type == 'gradient_based':
-                            # Apply standardization for gradient-based models
-                            from sklearn.preprocessing import StandardScaler
-                            scaler = StandardScaler()
-                            X_train_final = scaler.fit_transform(X_dev_for_ext_test)
-                            X_test_final = scaler.transform(X_ext_test_for_ext_test)
-                            logger.info(f"  Standardization applied for {model_key}")
-                        else:
-                            # No standardization for tree-based models
-                            X_train_final = X_dev_for_ext_test
-                            X_test_final = X_ext_test_for_ext_test
-                            logger.info(f"  Standardization skipped for {model_key} (tree-based model)")
+                        X_train_final, X_test_final, scaler = prepare_features_for_model(
+                            model_key,
+                            X_dev_for_ext_test,
+                            X_ext_test_for_ext_test,
+                            logger,
+                            prefix="  "
+                        )
                     else:
                         X_train_final = None
                         X_test_final = None
                 else:
-                    # Deep learning models (MLP, GAT, ChemBERTa)
-                    if model_config['type'] == 'pytorch':  # MLP
-                        # MLP needs standardization
-                        if X_dev_for_ext_test is not None and X_ext_test_for_ext_test is not None:
-                            from sklearn.preprocessing import StandardScaler
-                            scaler = StandardScaler()
-                            X_train_final = scaler.fit_transform(X_dev_for_ext_test)
-                            X_test_final = scaler.transform(X_ext_test_for_ext_test)
-                            logger.info(f"  Standardization applied for {model_key}")
-                        else:
-                            X_train_final = None
-                            X_test_final = None
-                    else:  # GAT, ChemBERTa (use SMILES, no feature processing needed)
-                        X_train_final = None
-                        X_test_final = None
+                    X_train_final = None
+                    X_test_final = None
                 
                 # Train on full Development Set
                 model_result = train_model_wrapper(

@@ -3,10 +3,10 @@
 
 Usage:
     python Scripts/step04_applicability_domain.py \
-        -p models_out/classification_20260330_151751/split_seed_30 \
-        --train-data models_out/classification_20260330_151751/split_seed_30/data/train_features.npz \
-        --external-data models_out/classification_20260330_151751/split_seed_30/data/splits/external_test.npz \
-        --predictions models_out/classification_20260330_151751/split_seed_30/predictions/external_test_predictions.csv \
+        -p models_out/classification_20260330_212716/split_seed_30 \
+        --train-data models_out/classification_20260330_212716/split_seed_30/data/train_features.npz \
+        --external-data models_out/classification_20260330_212716/split_seed_30/data/splits/external_test.npz \
+        --predictions models_out/classification_20260330_212716/split_seed_30/predictions/external_test_predictions.csv \
         -m RFC -s 42
 
 The script requires numpy-friendly NPZ files that include `features` and `labels`, and optional `ids`/`smiles`.  MiniSom must be installed for the SOM method (`pip install minisom`)."""

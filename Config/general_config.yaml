@@ -1,0 +1,64 @@
+# python ./Scripts/step01_train_qsar_models.py -c Config/general_config.yaml
+## Data source
+input_path: ""  # path to cleaned input file
+label_column: "label"
+pic50_column: "pic50"
+smiles_column: "smiles"
+id_column: "id"
+
+## Task & split settings
+task: "classification" 
+test_size: 0.2
+folds: 5
+run_cv_stage2: true
+save_cv_details: false
+
+## Training options
+tune: false
+tune_mode: "grid"
+cv_tune_metric: null
+seed: 42
+seeds:
+  - 42
+tune_iter: 25
+max_epochs: 100
+selected_models: [] # e.g. ["XGBC", "RFC", "MLP", "GAT", "ChemBERTa", "LR", "SVC", "ETC"]
+output_dir: "./models_out"
+n_jobs: -1
+
+## Feature processing
+variance_threshold: 0.01
+min_frequency: 0.05
+
+## SHAP + ensemble
+shap_max_display: 20
+shap_sample_size: 500
+run_shap: true
+create_ensemble: false
+ensemble_n_top: 3
+
+## Deep learning hyperparameters
+batch_size: 32
+learning_rate: 0.001
+early_stopping_patience: 10
+
+## Metadata & outputs
+config_file: ""
+split_seeds:
+  - 42
+save_train_features: ture # ture or false, ture for saving the training features for later use in robustness validation, false for not saving to save disk space
+ef_percentile: 1.0
+classification_threshold: 0.5
+model_param_overrides: {}
+deep_learning_pos_weight: null
+deep_learning_class_weights: []
+
+## Splitting & fingerprints
+split_method: "scaffold"
+cv_split_method: "scaffold"
+auto_generate_fingerprints: true
+fingerprint_types:
+  - "morgan"
+
+## External evaluation
+external_test_metric: "MCC"
