@@ -273,7 +273,7 @@ def main():
             )
             _, perm_proba = _evaluate_pytorch(perm_model, X, task, torch.device("cpu"))
 
-        rand_metrics.append(_metric_from_probs(y_rand, perm_proba, task))
+        rand_metrics.append(_metric_from_probs(y, perm_proba, task))
 
     rand_arr = np.asarray(rand_metrics, dtype=float)
     valid_rand = rand_arr[~np.isnan(rand_arr)]
