@@ -246,6 +246,10 @@ class QSARConfig:
     
     # Early enrichment settings
     ef_percentile: float = 1.0  # EF1%
+    classification_threshold: float = 0.5
+    model_param_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    deep_learning_pos_weight: Optional[float] = None
+    deep_learning_class_weights: List[float] = field(default_factory=list)
     
     # NOTE: Multi-modal fusion features are not currently implemented
     # The following fields are kept for potential future implementation
@@ -262,7 +266,7 @@ class QSARConfig:
     
     # Metric for selecting best model on external test set 
     external_test_metric: str = "MCC"  # (classification: AUC, PR_AUC, ACC, F1, MCC; regression: R2, RMSE, MAE)
-    
+
     @classmethod
     def from_json(cls, path: Union[str, Path]) -> 'QSARConfig':
         """Load configuration from JSON file"""
@@ -281,6 +285,16 @@ class QSARConfig:
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
         return cls(**data)
+
+
+def get_classification_threshold(config: QSARConfig) -> float:
+    """Return a valid binary decision threshold clamped to [0, 1]."""
+    threshold = getattr(config, "classification_threshold", 0.5)
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        threshold = 0.5
+    return min(max(threshold, 0.0), 1.0)
 
 # --------- Applicability Domain (AD) Calculation ---------
 def calculate_ad(X_train: np.ndarray, X_test: np.ndarray, method: str = "leverage", 
@@ -1626,6 +1640,7 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     
     device = DEVICE
     model = model.to(device)
+    threshold = get_classification_threshold(config)
     
     # ========== Model-specific Training Strategies ==========
     # For ChemBERTa transformer models, use specialized hyperparameters and optimizer
@@ -1659,7 +1674,21 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     # Use BCEWithLogitsLoss for classification for better numerical stability
     # This combines sigmoid and BCE in a single function for improved stability
     if task == "classification":
-        criterion = nn.BCEWithLogitsLoss()
+        pos_weight = getattr(config, "deep_learning_pos_weight", None)
+        if pos_weight is None:
+            class_weights = getattr(config, "deep_learning_class_weights", [])
+            if class_weights and len(class_weights) >= 2:
+                neg_weight, pos_weight_candidate = class_weights[0], class_weights[1]
+                if neg_weight == 0:
+                    pos_weight = pos_weight_candidate
+                else:
+                    pos_weight = pos_weight_candidate / neg_weight
+        if pos_weight is not None:
+            pos_weight_tensor = torch.tensor([pos_weight], device=device, dtype=torch.float32)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+            logger.debug(f"  Deep loss: BCEWithLogitsLoss(pos_weight={pos_weight:.4f})")
+        else:
+            criterion = nn.BCEWithLogitsLoss()
     else:
         criterion = nn.MSELoss()
     
@@ -1795,7 +1824,7 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
             if task == "classification":
                 # Apply sigmoid to logits for metric calculation
                 val_preds_proba = torch.sigmoid(torch.tensor(all_preds)).numpy()
-                val_preds_binary = (val_preds_proba >= 0.5).astype(int)
+                val_preds_binary = (val_preds_proba >= threshold).astype(int)
                 
                 # Calculate comprehensive metrics
                 try:
@@ -1850,7 +1879,7 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     
     return model
 
-def predict_pytorch_model(model, data_loader, task: str = "classification") -> Tuple[np.ndarray, np.ndarray]:
+def predict_pytorch_model(model, data_loader, task: str = "classification", threshold: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
     """Get predictions from PyTorch model"""
     # Handle empty data loader
     if data_loader is None:
@@ -1886,10 +1915,11 @@ def predict_pytorch_model(model, data_loader, task: str = "classification") -> T
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
+    threshold = min(max(threshold, 0.0), 1.0)
     if task == "classification":
         # Apply sigmoid to get probabilities (model now outputs logits)
         all_proba = torch.sigmoid(torch.tensor(all_preds)).numpy()
-        all_labels = (all_proba >= 0.5).astype(int) # threshold should be modifiable if needed
+        all_labels = (all_proba >= threshold).astype(int)
         return all_labels, all_proba
     else:
         all_labels = all_preds
@@ -1927,12 +1957,16 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         logger = logging.getLogger(__name__)
     
     logger.info(f"\n--- Training {model_key} ---")
+
+    threshold = get_classification_threshold(config)
     
     model_type = model_config.get('type', 'sklearn')
     
     # ===== Sklearn Models =====
     if model_type == 'sklearn':
         params = dict(model_config.get('params') or {})
+        overrides = getattr(config, "model_param_overrides", {}) or {}
+        params.update(overrides.get(model_key, {}))
         model_cls = model_config['model']
 
         # Derive a reproducibility seed for sklearn estimators.
@@ -1978,7 +2012,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         else:
             y_proba_train = model.predict(X_train)
         
-        y_pred_train = (y_proba_train >= 0.5).astype(int) if task == "classification" else y_proba_train
+        y_pred_train = (y_proba_train >= threshold).astype(int) if task == "classification" else y_proba_train
         
         # Predictions on validation set (if provided)
         y_proba_val = None
@@ -1994,7 +2028,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             else:
                 y_proba_val = model.predict(X_val)
             
-            y_pred_val = (y_proba_val >= 0.5).astype(int) if task == "classification" else y_proba_val
+            y_pred_val = (y_proba_val >= threshold).astype(int) if task == "classification" else y_proba_val
         
         return {
             'model': model,
@@ -2037,8 +2071,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch")
         
         # Predictions
-        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task)
-        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task) if val_loader is not None else (None, None)
+        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
+        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
         return {
             'model': model,
@@ -2090,8 +2124,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
         
         # Predictions
-        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task)
-        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task) if val_loader is not None else (None, None)
+        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
+        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
         return {
             'model': model,
@@ -2133,8 +2167,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="transformer")
         
         # Predictions
-        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task)
-        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task) if val_loader is not None else (None, None)
+        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
+        y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
         return {
             'model': model,
@@ -3106,6 +3140,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
     stage_seed = split_seed if split_seed is not None else config.seed
     logger.info(f"Split seed in use: {stage_seed}")
 
+    decision_threshold = get_classification_threshold(config)
+
     from sklearn.model_selection import StratifiedKFold, KFold
     from sklearn.model_selection import train_test_split
     
@@ -3787,7 +3823,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                         test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
                     
                     y_pred_ext_test, y_proba_ext_test = predict_pytorch_model(
-                        model_result['model'], test_loader, config.task
+                        model_result['model'], test_loader, config.task, threshold=decision_threshold
                     )
                 else:
                     # For traditional models
@@ -3800,7 +3836,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                     else:
                         y_proba_ext_test = model_result['model'].predict(X_test_final)
                     
-                    y_pred_ext_test = (y_proba_ext_test >= 0.5).astype(int) if config.task == "classification" else y_proba_ext_test
+                    y_pred_ext_test = (y_proba_ext_test >= decision_threshold).astype(int) if config.task == "classification" else y_proba_ext_test
                 
                 # Calculate metrics on External Test Set
                 ext_test_metrics = calculate_metrics(
@@ -4599,6 +4635,12 @@ External Test Set Evaluation:
     parser.add_argument('--batch-size', type=int, help='Batch size for deep models (default: 32)')
     parser.add_argument('--lr', type=float, help='Learning rate (default: 0.001)')
     parser.add_argument('--ef', type=float, help='Early Enrichment Factor percentile (default: 1.0)')
+    parser.add_argument('--classification-threshold', type=float,
+                       help='Binary decision threshold for probability outputs (default: 0.5)')
+    parser.add_argument('--deep-pos-weight', type=float,
+                       help='Positive-class weight passed to BCEWithLogitsLoss for deep models')
+    parser.add_argument('--deep-class-weights', type=str,
+                       help='Comma-separated class weights (e.g., \"0.71,0.29\") for deep learning loss scaling')
     parser.add_argument('--variance-threshold', type=float, help='Variance threshold for feature filtering (default: 0.01)')
     parser.add_argument('--split-method', choices=['scaffold', 'stratified', 'random'], 
                        help='Data split method: scaffold (default), stratified, or random')
@@ -4680,6 +4722,16 @@ External Test Set Evaluation:
                 config.tune_iter = args.tune_iter
         if args.save_train_features:
             config.save_train_features = True
+        if args.classification_threshold is not None:
+            config.classification_threshold = args.classification_threshold
+        if args.deep_pos_weight is not None:
+            config.deep_learning_pos_weight = args.deep_pos_weight
+        if args.deep_class_weights:
+            config.deep_learning_class_weights = [
+                float(value.strip())
+                for value in args.deep_class_weights.split(',')
+                if value.strip()
+            ]
         
         config.config_file = str(args.config)
     
@@ -4726,6 +4778,13 @@ External Test Set Evaluation:
             save_cv_details=args.save_cv_details,
             run_cv_stage2=not args.skip_cv_stage2,
             save_train_features=args.save_train_features,
+            classification_threshold=args.classification_threshold if args.classification_threshold is not None else 0.5,
+            deep_learning_pos_weight=args.deep_pos_weight,
+            deep_learning_class_weights=[
+                float(value.strip())
+                for value in args.deep_class_weights.split(',')
+                if value.strip()
+            ] if args.deep_class_weights else []
         )
         if args.tune_stage2:
             config.tune = True

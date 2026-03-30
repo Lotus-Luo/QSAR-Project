@@ -215,6 +215,36 @@ learning_rate: 0.001
 early_stopping_patience: 5
 
 # ------------------------------------------------------------------------------
+# Class imbalance & prediction thresholds
+# ------------------------------------------------------------------------------
+# Decision threshold used for turning probabilities into labels (can be >0.5 for stricter positives)
+# Default (when omitted) is 0.5; increase to favor precision.
+classification_threshold: 0.6
+
+# Traditional ML overrides for handling imbalanced classes (0≈29.1%, 1≈70.9%)
+# Use sklearn's class_weight or model-specific options like scale_pos_weight for XGBoost.
+# Leave empty (`{}`) to use each estimator's default weighting.
+model_param_overrides:
+  LR:
+    class_weight: {0: 0.71, 1: 0.29}
+  RFC:
+    class_weight: balanced
+  SVC:
+    class_weight: balanced
+  XGBC:
+    scale_pos_weight: 0.41
+  LGBMC:
+    class_weight: balanced
+  ETC:
+    class_weight: balanced
+
+# Deep learning loss scaling
+# `deep_learning_pos_weight` defaults to null (no pos_weight). Set to neg/pos ratio to bias BCE loss.
+deep_learning_pos_weight: 0.41
+# `deep_learning_class_weights` list is interpreted as [weight_for_class_0, weight_for_class_1] and used only when `pos_weight` is unset.
+deep_learning_class_weights: [0.709, 0.291]
+
+# ------------------------------------------------------------------------------
 # Early Enrichment Factor Configuration
 # ------------------------------------------------------------------------------
 
@@ -254,10 +284,8 @@ shap_sample_size: 500
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
 # Hyperparameter Tuning Configuration (Experimental)
-# ------------------------------------------------------------------------------'''
 # ------------------------------------------------------------------------------
-# Hyperparameter Tuning Configuration (Experimental)
-# ------------------------------------------------------------------------------
+
 
 # Enable hyperparameter tuning for selected models
 # Note: This will significantly increase training time
