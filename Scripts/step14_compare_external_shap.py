@@ -118,7 +118,11 @@ def _create_explainer(model, X_sample: pd.DataFrame, task: str):
 
     def _safe_tree_explainer():
         try:
-            explainer = shap.TreeExplainer(model)
+            explainer = shap.TreeExplainer(
+                model,
+                feature_perturbation='tree_path_dependent',
+                model_output='probability',
+            )
             values = explainer.shap_values(X_sample)
             return values, explainer
         except Exception as exc:  # pragma: no cover - compatibility issue
