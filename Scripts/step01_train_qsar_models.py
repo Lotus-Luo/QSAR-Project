@@ -1022,16 +1022,15 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem
     
-    class GATModel(nn.Module):
-        """Graph Attention Network for molecular graphs"""
-        def __init__(self, num_node_features: int, num_edge_features: int, hidden_dim: int = 64, 
+    class GATEncoder(nn.Module):
+        """Graph encoder used by GAT-based models"""
+        def __init__(self, num_node_features: int, num_edge_features: int, hidden_dim: int = 64,
                      num_heads: int = 4, num_layers: int = 3, dropout: float = 0.3):
-            super(GATModel, self).__init__()
-            
+            super(GATEncoder, self).__init__()
             self.num_layers = num_layers
+            self.dropout = nn.Dropout(dropout)
             self.convs = nn.ModuleList()
-            
-            # First GAT layer
+
             self.convs.append(
                 GATConv(
                     num_node_features,
@@ -1041,8 +1040,6 @@ try:
                     edge_dim=num_edge_features,
                 )
             )
-            
-            # Additional GAT layers
             for _ in range(num_layers - 1):
                 self.convs.append(
                     GATConv(
@@ -1053,23 +1050,85 @@ try:
                         edge_dim=num_edge_features,
                     )
                 )
-            
-            # Output layer
+
             self.output_dim = hidden_dim * num_heads
-            self.fc = nn.Linear(self.output_dim, 1)
-            self.dropout = nn.Dropout(dropout)
-        
+
         def forward(self, x, edge_index, batch, edge_attr=None):
-            for i, conv in enumerate(self.convs):
+            for conv in self.convs:
                 x = conv(x, edge_index, edge_attr=edge_attr)
                 x = F.elu(x)
                 x = self.dropout(x)
-            
-            # Global pooling
             x = global_mean_pool(x, batch)
-            
-            # Final prediction (no sigmoid here - BCEWithLogitsLoss handles it)
+            return x
+
+
+    class GATModel(nn.Module):
+        """Graph Attention Network for molecular graphs"""
+        def __init__(self, num_node_features: int, num_edge_features: int, hidden_dim: int = 64, 
+                     num_heads: int = 4, num_layers: int = 3, dropout: float = 0.3):
+            super(GATModel, self).__init__()
+            self.encoder = GATEncoder(
+                num_node_features=num_node_features,
+                num_edge_features=num_edge_features,
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                dropout=dropout,
+            )
+            self.fc = nn.Linear(self.encoder.output_dim, 1)
+        
+        def forward(self, x, edge_index, batch, edge_attr=None, **kwargs):
+            x = self.encoder(x, edge_index, batch, edge_attr=edge_attr)
             return self.fc(x).squeeze(dim=-1)
+
+
+    class HybridGATFingerprintModel(nn.Module):
+        """Hybrid fusion of GAT graph embeddings with fingerprint MLP branch"""
+        def __init__(self,
+                     gat_params: Dict[str, Any],
+                     fingerprint_dim: int,
+                     fp_hidden_dims: Optional[List[int]] = None,
+                     fusion_hidden_dims: Optional[List[int]] = None,
+                     dropout: float = 0.3,
+                     freeze_gat: bool = False,
+                     freeze_fp: bool = False):
+            super(HybridGATFingerprintModel, self).__init__()
+            self.gat_encoder = GATEncoder(**gat_params)
+            fp_hidden_dims = fp_hidden_dims or [128, 128]
+            fp_output_dim = fp_hidden_dims[-1]
+            self.fp_encoder = ResidualMLP(
+                input_dim=fingerprint_dim,
+                hidden_dims=fp_hidden_dims,
+                output_dim=fp_output_dim,
+                dropout=dropout,
+                activation="mish",
+                use_residual=True,
+                norm_type="layernorm"
+            )
+            fusion_input = self.gat_encoder.output_dim + fp_output_dim
+            self.fusion_head = ResidualMLP(
+                input_dim=fusion_input,
+                hidden_dims=fusion_hidden_dims or [256],
+                output_dim=1,
+                dropout=dropout,
+                activation="mish",
+                use_residual=True,
+                norm_type="layernorm"
+            )
+            if freeze_gat:
+                for param in self.gat_encoder.parameters():
+                    param.requires_grad = False
+            if freeze_fp:
+                for param in self.fp_encoder.parameters():
+                    param.requires_grad = False
+
+        def forward(self, x, edge_index, batch, edge_attr=None, fingerprint_features=None, **kwargs):
+            if fingerprint_features is None:
+                raise ValueError("HybridGATFingerprintModel requires fingerprint_features")
+            graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
+            fp_repr = self.fp_encoder(fingerprint_features)
+            fused = torch.cat([graph_repr, fp_repr], dim=-1)
+            return self.fusion_head(fused).squeeze(-1)
     
     GAT_AVAILABLE = True
 except ImportError:
@@ -1206,43 +1265,67 @@ def smiles_to_graph(smiles: str, logger: Optional[logging.Logger] = None) -> Opt
 
 class MoleculeDataset(Dataset):
     """Dataset for molecular graphs"""
-    def __init__(self, smiles_list, labels, logger: Optional[logging.Logger] = None):
+    def __init__(self,
+                 smiles_list,
+                 labels,
+                 logger: Optional[logging.Logger] = None,
+                 extra_fp_features: Optional[Union[np.ndarray, List[List[float]]]] = None,
+                 tokenizer=None,
+                 max_length: int = 128,
+                 return_extra: bool = False):
         self.graphs = []
         invalid_indices = []
         total = len(smiles_list) if smiles_list is not None else 0
-        
-        # Prefer logging over stdout; also avoid tqdm spamming in non-interactive runs.
+        self.max_length = max_length
+        self.return_extra = return_extra
+
         iterator = tqdm(smiles_list, disable=(logger is not None))
         if logger:
             logger.info("Converting SMILES to graphs (GAT)...")
         else:
             print("Converting SMILES to graphs...")
-        
+
         for idx, smiles in enumerate(iterator):
             graph = smiles_to_graph(smiles, logger=logger)
             self.graphs.append(graph)
             if graph is None:
                 invalid_indices.append(idx)
-        
-        # Filter out None values - track valid indices for external use
+
         valid_indices = [i for i, g in enumerate(self.graphs) if g is not None]
-        self.valid_indices = valid_indices  # Store original indices of valid samples
+        self.valid_indices = valid_indices
         self.graphs = [self.graphs[i] for i in valid_indices]
         self.labels = [labels[i] for i in valid_indices]
         self.smiles_list = [smiles_list[i] for i in valid_indices]
-        
-        n_valid = len(self.graphs)
-        n_invalid = len(invalid_indices)
-        fail_rate = (n_invalid / total) if total else 0.0
-        msg = f"GAT graph conversion: {n_valid}/{total} valid ({fail_rate*100:.2f}% failed)"
+
+        fail_rate = (len(invalid_indices) / total * 100.0) if total else 0.0
         if logger:
-            logger.info(msg)
-            if n_invalid > 0:
-                # Log a short preview of failures to help track down data issues.
+            logger.info(f"GAT graph conversion: {len(self.graphs)}/{total} valid ({fail_rate:.2f}% failed)" if total else "No samples found")
+            if invalid_indices:
                 preview = invalid_indices[:5]
                 logger.warning(f"GAT invalid SMILES indices (first 5): {preview}")
         else:
+            msg = f"GAT graph conversion: {len(self.graphs)}/{total} valid ({fail_rate:.2f}% failed)" if total else "No samples found"
             print(msg)
+
+        self.fp_features = None
+        if extra_fp_features is not None:
+            extra_array = np.asarray(extra_fp_features, dtype=np.float32)
+            if extra_array.shape[0] != total:
+                raise ValueError("extra_fp_features must align with smiles_list length")
+            self.fp_features = torch.tensor(extra_array[valid_indices], dtype=torch.float32)
+
+        self.input_ids = None
+        self.attention_mask = None
+        if tokenizer is not None and self.smiles_list:
+            encoding = tokenizer(
+                self.smiles_list,
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt"
+            )
+            self.input_ids = encoding['input_ids']
+            self.attention_mask = encoding['attention_mask']
     
     def __len__(self):
         return len(self.graphs)
@@ -1252,12 +1335,72 @@ class MoleculeDataset(Dataset):
         # This format is compatible with PyTorch Geometric's GeometricDataLoader
         graph = self.graphs[idx]
         graph.y = torch.tensor([self.labels[idx]], dtype=torch.float32)
+        extras = {}
+        if self.fp_features is not None:
+            extras['fp_features'] = self.fp_features[idx]
+        if self.input_ids is not None:
+            extras['input_ids'] = self.input_ids[idx]
+            extras['attention_mask'] = self.attention_mask[idx]
+        if self.return_extra:
+            return graph, extras
         return graph
+
+
+def hybrid_collate_fn(batch):
+    """
+    Collate function for hybrid batches returning (Batch, extras dict).
+    """
+    data_list = []
+    extras_list = []
+    for item in batch:
+        if isinstance(item, tuple):
+            graph, extras = item
+        else:
+            graph, extras = item, {}
+        data_list.append(graph)
+        extras_list.append(extras or {})
+
+    batched = Batch.from_data_list(data_list)
+    merged_extras = {}
+    all_keys = set().union(*(extras.keys() for extras in extras_list))
+    for key in all_keys:
+        tensors = [extras.get(key) for extras in extras_list]
+        if any(tensor is None for tensor in tensors):
+            continue
+        merged_extras[key] = torch.stack(tensors, dim=0)
+    return batched, merged_extras
 
 # --------- ChemBERTa Model ---------
 try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, RobertaForSequenceClassification
+    from transformers import (
+        AutoTokenizer,
+        AutoModelForSequenceClassification,
+        AutoModel,
+        RobertaForSequenceClassification
+    )
     # DeepChem/ChemBERTa-77M-MLM, DeepChem/ChemBERTa-77M-MTR, seyonec/ChemBERTa-zinc-base-v1
+    def _resolve_chemberta_load_path(model_name: str) -> Tuple[str, bool]:
+        model_name_mapping = {
+            "DeepChem/ChemBERTa-77M-MLM": "chemberta_77m_mlm",
+            "DeepChem/ChemBERTa-77M-MTR": "chemberta_77m_mtr",
+            "seyonec/ChemBERTa-zinc-base-v1": "chemberta_zinc_v1",
+        }
+        local_folder_name = None
+        for key, value in model_name_mapping.items():
+            if key.lower() == model_name.lower():
+                local_folder_name = value
+                break
+
+        if local_folder_name is None:
+            local_folder_name = model_name.split('/')[-1].replace("-", "_")
+
+        local_path = os.path.join("pretrained_model", "all_chemberta_models", local_folder_name)
+        config_path = os.path.join(local_path, "config.json")
+        if os.path.exists(local_path) and os.path.exists(config_path):
+            return local_path, True
+        return model_name, False
+
+
     class ChemBERTaModel(nn.Module):
         """
         ChemBERTa Transformer for molecular property prediction using AutoModelForSequenceClassification.
@@ -1274,35 +1417,11 @@ try:
         def __init__(self, model_name: str = "DeepChem/ChemBERTa-77M-MLM", num_labels: int = 1):
             super(ChemBERTaModel, self).__init__()
 
-            # Mapping from Hugging Face model names to local folder names
-            # Note: Keys use standard capitalization (77M), but matching is case-insensitive
-            model_name_mapping = {
-                "DeepChem/ChemBERTa-77M-MLM": "chemberta_77m_mlm",
-                "DeepChem/ChemBERTa-77M-MTR": "chemberta_77m_mtr",
-                "seyonec/ChemBERTa-zinc-base-v1": "chemberta_zinc_v1",
-            }
-
-            # Get the corresponding local folder name (case-insensitive matching)
-            local_folder_name = None
-            for key, value in model_name_mapping.items():
-                if key.lower() == model_name.lower():
-                    local_folder_name = value
-                    break
-
-            # Fallback to generating folder name from model_name if no match found
-            if local_folder_name is None:
-                local_folder_name = model_name.split('/')[-1].replace("-", "_")
-            local_path = os.path.join("pretrained_model", "all_chemberta_models", local_folder_name)
-
-            # Check if local path exists and contains config file
-            if os.path.exists(local_path) and os.path.exists(os.path.join(local_path, "config.json")):
-                load_path = local_path
-                use_local = True
+            load_path, use_local = _resolve_chemberta_load_path(model_name)
+            if use_local:
                 print(f"[INFO] Loading ChemBERTa from LOCAL path: {load_path}")
             else:
-                load_path = model_name
-                use_local = False
-                print(f"[INFO] Local model not found at {local_path}. Downloading from HuggingFace: {load_path}")
+                print(f"[INFO] Local model not found at {load_path}. Downloading from HuggingFace: {load_path}")
             
             # Load tokenizer with local_files_only only when using local path
             # This allows automatic download from HuggingFace when local model is not available
@@ -1320,7 +1439,7 @@ try:
                 ignore_mismatched_sizes=True,
                 local_files_only=use_local
             )
-        
+
         def forward(self, input_ids, attention_mask):
             """
             Forward pass through ChemBERTa model
@@ -1335,6 +1454,68 @@ try:
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits
             return logits.squeeze(-1)
+
+    class ChemBERTaEncoder(nn.Module):
+        """ChemBERTa encoder returning pooled features for fusion"""
+        def __init__(self, model_name: str = "DeepChem/ChemBERTa-77M-MLM", dropout: float = 0.1):
+            super(ChemBERTaEncoder, self).__init__()
+            load_path, use_local = _resolve_chemberta_load_path(model_name)
+            if use_local:
+                print(f"[INFO] Loading ChemBERTa encoder from LOCAL path: {load_path}")
+            else:
+                print(f"[INFO] Local ChemBERTa encoder not found at {load_path}. Downloading from HuggingFace.")
+            self.tokenizer = AutoTokenizer.from_pretrained(load_path, local_files_only=use_local)
+            self.model = AutoModel.from_pretrained(load_path, local_files_only=use_local)
+            self.dropout = nn.Dropout(dropout)
+            self.hidden_size = self.model.config.hidden_size
+            self.max_length = getattr(self.tokenizer, "model_max_length", 128)
+
+        def forward(self, input_ids, attention_mask):
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            pooled = outputs.pooler_output
+            if pooled is None:
+                pooled = outputs.last_hidden_state.mean(dim=1)
+            return self.dropout(pooled)
+
+
+    class HybridGATChemBERTaFusionModel(nn.Module):
+        """Hybrid fusion of GAT and ChemBERTa encoders"""
+        def __init__(self,
+                     gat_params: Dict[str, Any],
+                     bert_model_name: str = "DeepChem/ChemBERTa-77M-MLM",
+                     fusion_hidden_dims: Optional[List[int]] = None,
+                     dropout: float = 0.3,
+                     freeze_gat: bool = False,
+                     freeze_bert: bool = False,
+                     bert_encoder: Optional['ChemBERTaEncoder'] = None):
+            super(HybridGATChemBERTaFusionModel, self).__init__()
+            self.gat_encoder = GATEncoder(**gat_params)
+            self.bert_encoder = bert_encoder or ChemBERTaEncoder(bert_model_name, dropout=dropout)
+            fusion_input = self.gat_encoder.output_dim + self.bert_encoder.hidden_size
+            self.fusion_head = ResidualMLP(
+                input_dim=fusion_input,
+                hidden_dims=fusion_hidden_dims or [256],
+                output_dim=1,
+                dropout=dropout,
+                activation="mish",
+                use_residual=True,
+                norm_type="layernorm"
+            )
+            if freeze_gat:
+                for param in self.gat_encoder.parameters():
+                    param.requires_grad = False
+            if freeze_bert:
+                for param in self.bert_encoder.parameters():
+                    param.requires_grad = False
+
+        def forward(self, x, edge_index, batch, edge_attr=None, fingerprint_features=None,
+                    input_ids=None, attention_mask=None, **kwargs):
+            if input_ids is None or attention_mask is None:
+                raise ValueError("HybridGATChemBERTaFusionModel requires ChemBERTa inputs")
+            graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
+            bert_repr = self.bert_encoder(input_ids, attention_mask)
+            fused = torch.cat([graph_repr, bert_repr], dim=-1)
+            return self.fusion_head(fused).squeeze(-1)
     
     CHEMBERTA_AVAILABLE = True
 except ImportError:
@@ -1473,6 +1654,30 @@ def chemberta_collate_fn(batch, max_length: int = 128):
     }
 
 # --------- Model Registry ---------
+DEFAULT_MODALITY_MAP = {
+    'sklearn': 'fingerprint',
+    'pytorch': 'fingerprint',
+    'pytorch_geometric': 'graph',
+    'transformer': 'sequence',
+    'hybrid_gat_fp': 'hybrid',
+    'hybrid_gat_bert': 'hybrid'
+}
+
+EXPECTED_MODALITIES = ['fingerprint', 'graph', 'sequence', 'hybrid']
+
+
+def get_model_modality(model_config: Dict[str, Any]) -> str:
+    """
+    Determine the modality for a model based on its explicit config or type.
+    """
+    if not model_config:
+        return 'fingerprint'
+    modality = model_config.get('modality')
+    if modality:
+        return modality
+    return DEFAULT_MODALITY_MAP.get(model_config.get('type'), 'fingerprint')
+
+
 def build_model_registry(task: str = "classification", input_dim: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
     """
     Build model registry with all available models
@@ -1491,6 +1696,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         # LR
         registry['LR'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': LogisticRegression,
             'params': {'max_iter': 2000, 'solver': 'lbfgs'},
             'grid': {'C': [0.01, 0.1, 1, 10, 100]}
@@ -1499,6 +1705,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         # RFC
         registry['RFC'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': RandomForestClassifier,
             'params': {'n_estimators': 400, 'n_jobs': -1, 'bootstrap': True},
             'grid': {'n_estimators': [300, 500, 800], 'max_depth': [None, 20, 40]}
@@ -1507,6 +1714,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         # SVC
         registry['SVC'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': SVC,
             'params': {'probability': True},
             'grid': {'C': [0.1, 1, 10], 'gamma': ['scale', 'auto']}
@@ -1517,19 +1725,20 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
             from xgboost import XGBClassifier
             registry['XGBC'] = {
                 'type': 'sklearn',
+                'modality': 'fingerprint',
                 'model': XGBClassifier,
-                # Explicit keys (None values will be overwritten by train_model_wrapper using the active seed).
                 'params': {'random_state': None, 'seed': None, 'subsample': 0.8},
                 'grid': {'n_estimators': [300, 600, 1000], 'max_depth': [3, 6, 9], 'learning_rate': [0.03, 0.1]}
             }
         except ImportError:
             pass
-        
+
         # LGBMC
         try:
             from lightgbm import LGBMClassifier
             registry['LGBMC'] = {
                 'type': 'sklearn',
+                'modality': 'fingerprint',
                 'model': LGBMClassifier,
                 'params': {'subsample': 0.8},
                 'grid': {'n_estimators': [400, 800, 1200], 'num_leaves': [31, 63, 127], 'learning_rate': [0.03, 0.1]}
@@ -1540,6 +1749,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         # ETC
         registry['ETC'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': ExtraTreesClassifier,
             'params': {'n_estimators': 400, 'n_jobs': -1},
             'grid': {'n_estimators': [300, 600, 1000], 'max_depth': [None, 20, 40]}
@@ -1549,6 +1759,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         # Regression models
         registry['Ridge'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': Ridge,
             'params': {},
             'grid': {'alpha': [1e-3, 1e-2, 1e-1, 1, 10, 100]}
@@ -1556,6 +1767,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         
         registry['RFR'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': RandomForestRegressor,
             'params': {'n_estimators': 400, 'n_jobs': -1},
             'grid': {'n_estimators': [300, 600, 1000], 'max_depth': [None, 20, 40]}
@@ -1563,6 +1775,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         
         registry['ETR'] = {
             'type': 'sklearn',
+            'modality': 'fingerprint',
             'model': ExtraTreesRegressor,
             'params': {'n_estimators': 400, 'n_jobs': -1},
             'grid': {'n_estimators': [300, 600, 1000], 'max_depth': [None, 20, 40]}
@@ -1574,6 +1787,7 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
     # Always add MLP to registry, but input_dim will be set dynamically in train_model_wrapper
     registry['MLP'] = {
         'type': 'pytorch',
+        'modality': 'fingerprint',
         'model_class': ResidualMLP,
         'params': {
             'input_dim': input_dim if input_dim is not None else -1,  # Placeholder -1, will be updated dynamically
@@ -1590,9 +1804,9 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
     if GAT_AVAILABLE:
         registry['GAT'] = {
             'type': 'pytorch_geometric',
+            'modality': 'graph',
             'model_class': GATModel,
             'params': {
-                # Dynamically inferred from actual graph tensor shape in train_model_wrapper.
                 'num_node_features': None,
                 'num_edge_features': None,
                 'hidden_dim': 64,
@@ -1601,11 +1815,54 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
                 'dropout': 0.3
             }
         }
+        registry['Hybrid_GAT_FP'] = {
+            'type': 'hybrid_gat_fp',
+            'modality': 'hybrid',
+            'model_class': HybridGATFingerprintModel,
+            'params': {
+                'gat_params': {
+                    'num_node_features': None,
+                    'num_edge_features': None,
+                    'hidden_dim': 64,
+                    'num_heads': 4,
+                    'num_layers': 3,
+                    'dropout': 0.3
+                },
+                'fingerprint_dim': None,
+                'fp_hidden_dims': [128, 128],
+                'fusion_hidden_dims': [256],
+                'dropout': 0.3,
+                'freeze_gat': False,
+                'freeze_fp': False
+            }
+        }
+        if CHEMBERTA_AVAILABLE:
+            registry['Hybrid_GAT_BERT'] = {
+                'type': 'hybrid_gat_bert',
+                'modality': 'hybrid',
+                'model_class': HybridGATChemBERTaFusionModel,
+                'params': {
+                    'gat_params': {
+                        'num_node_features': None,
+                        'num_edge_features': None,
+                        'hidden_dim': 64,
+                        'num_heads': 4,
+                        'num_layers': 3,
+                        'dropout': 0.3
+                    },
+                    'bert_model_name': 'DeepChem/ChemBERTa-77M-MLM',
+                    'fusion_hidden_dims': [256],
+                    'dropout': 0.3,
+                    'freeze_gat': False,
+                    'freeze_bert': False
+                }
+            }
     
     # ChemBERTa
     if CHEMBERTA_AVAILABLE:
         registry['ChemBERTa'] = {
             'type': 'transformer',
+            'modality': 'sequence',
             'model_class': ChemBERTaModel,
             'params': {
                 'model_name': 'DeepChem/ChemBERTa-77M-MLM',
@@ -1711,11 +1968,35 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
         
         for batch in pbar:
             # Handle different batch formats
-            if isinstance(batch, Data):  # GAT - Batch object (Data subclass) with y attribute
-                batch = batch.to(device)
-                labels = batch.y
+            data_batch = None
+            extras = {}
+            if isinstance(batch, tuple) and isinstance(batch[0], Data):
+                data_batch, extras = batch
+            elif isinstance(batch, Data):
+                data_batch = batch
+
+            if data_batch is not None:
+                data_batch = data_batch.to(device)
+                labels = data_batch.y
+                fp_tensor = extras.get('fp_features')
+                input_ids = extras.get('input_ids')
+                attn_mask = extras.get('attention_mask')
+                if fp_tensor is not None:
+                    fp_tensor = fp_tensor.to(device)
+                if input_ids is not None:
+                    input_ids = input_ids.to(device)
+                if attn_mask is not None:
+                    attn_mask = attn_mask.to(device)
                 optimizer.zero_grad()
-                outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
+                outputs = model(
+                    data_batch.x,
+                    data_batch.edge_index,
+                    data_batch.batch,
+                    edge_attr=getattr(data_batch, "edge_attr", None),
+                    fingerprint_features=fp_tensor,
+                    input_ids=input_ids,
+                    attention_mask=attn_mask
+                )
                 loss = criterion(outputs, labels)
             elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
                 inputs, labels = batch
@@ -1782,10 +2063,34 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
                               leave=False, disable=logger is None)
                 
                 for batch in pbar_val:
-                    if isinstance(batch, Data):  # GAT - Batch object (Data subclass) with y attribute
-                        batch = batch.to(device)
-                        labels = batch.y
-                        outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
+                    data_batch = None
+                    extras = {}
+                    if isinstance(batch, tuple) and isinstance(batch[0], Data):
+                        data_batch, extras = batch
+                    elif isinstance(batch, Data):
+                        data_batch = batch
+
+                    if data_batch is not None:
+                        data_batch = data_batch.to(device)
+                        labels = data_batch.y
+                        fp_tensor = extras.get('fp_features')
+                        input_ids = extras.get('input_ids')
+                        attn_mask = extras.get('attention_mask')
+                        if fp_tensor is not None:
+                            fp_tensor = fp_tensor.to(device)
+                        if input_ids is not None:
+                            input_ids = input_ids.to(device)
+                        if attn_mask is not None:
+                            attn_mask = attn_mask.to(device)
+                        outputs = model(
+                            data_batch.x,
+                            data_batch.edge_index,
+                            data_batch.batch,
+                            edge_attr=getattr(data_batch, "edge_attr", None),
+                            fingerprint_features=fp_tensor,
+                            input_ids=input_ids,
+                            attention_mask=attn_mask
+                        )
                         loss = criterion(outputs, labels)
                     elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
                         inputs, labels = batch
@@ -1893,9 +2198,33 @@ def predict_pytorch_model(model, data_loader, task: str = "classification", thre
     
     with torch.no_grad():
         for batch in data_loader:
-            if isinstance(batch, Data):  # GAT - Batch object (Data subclass)
-                batch = batch.to(device)
-                outputs = model(batch.x, batch.edge_index, batch.batch, edge_attr=getattr(batch, "edge_attr", None))
+            data_batch = None
+            extras = {}
+            if isinstance(batch, tuple) and isinstance(batch[0], Data):
+                data_batch, extras = batch
+            elif isinstance(batch, Data):
+                data_batch = batch
+
+            if data_batch is not None:
+                data_batch = data_batch.to(device)
+                fp_tensor = extras.get('fp_features')
+                input_ids = extras.get('input_ids')
+                attention_mask = extras.get('attention_mask')
+                if fp_tensor is not None:
+                    fp_tensor = fp_tensor.to(device)
+                if input_ids is not None:
+                    input_ids = input_ids.to(device)
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(device)
+                outputs = model(
+                    data_batch.x,
+                    data_batch.edge_index,
+                    data_batch.batch,
+                    edge_attr=getattr(data_batch, "edge_attr", None),
+                    fingerprint_features=fp_tensor,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask
+                )
             elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
                 inputs, _ = batch
                 inputs = inputs.to(device)
@@ -2137,6 +2466,132 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             'valid_indices_val': val_dataset.valid_indices if val_loader is not None else None
         }
     
+    # ===== Hybrid Models (Multi-modal) =====
+    elif model_type == 'hybrid_gat_fp':
+        if smiles_train is None:
+            logger.error(f"SMILES data required for {model_key}")
+            return None
+
+        fp_train = X_train
+        if fp_train is None:
+            logger.info(f"{model_key}: fingerprint features missing, computing Morgan fingerprints as fallback.")
+            fp_train = compute_morgan_fingerprints(smiles_train, logger=logger)
+
+        train_dataset = MoleculeDataset(
+            smiles_train, y_train, logger=logger,
+            extra_fp_features=fp_train, tokenizer=None, return_extra=True
+        )
+        if len(train_dataset) == 0:
+            logger.error(f"{model_key}: no valid training graphs after SMILES->graph conversion.")
+            return None
+
+        inferred_node_dim = int(train_dataset.graphs[0].x.shape[1])
+        inferred_edge_dim = int(train_dataset.graphs[0].edge_attr.shape[1]) if hasattr(train_dataset.graphs[0], "edge_attr") else 0
+        gat_params = dict(model_config['params'].get('gat_params', {}))
+        gat_params['num_node_features'] = inferred_node_dim
+        gat_params['num_edge_features'] = inferred_edge_dim
+
+        fusion_params = dict(model_config['params'])
+        fusion_params['gat_params'] = gat_params
+        fusion_params['fingerprint_dim'] = fp_train.shape[1]
+
+        model = model_config['model_class'](**fusion_params)
+
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=hybrid_collate_fn)
+        y_train_filtered = y_train[train_dataset.valid_indices]
+
+        val_loader = None
+        y_val_filtered = None
+        val_dataset = None
+        if smiles_val is not None and len(smiles_val) > 0:
+            fp_val = X_val
+            if fp_val is None:
+                fp_val = compute_morgan_fingerprints(smiles_val, logger=logger)
+            val_dataset = MoleculeDataset(
+                smiles_val, y_val, logger=logger,
+                extra_fp_features=fp_val, tokenizer=None, return_extra=True
+            )
+            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=hybrid_collate_fn)
+            y_val_filtered = y_val[val_dataset.valid_indices]
+
+        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
+
+        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
+        y_pred_val, y_proba_val = (predict_pytorch_model(model, val_loader, task, threshold=threshold)
+                                   if val_loader is not None else (None, None))
+
+        return {
+            'model': model,
+            'y_pred_train': y_pred_train,
+            'y_proba_train': y_proba_train,
+            'y_pred_val': y_pred_val,
+            'y_proba_val': y_proba_val,
+            'valid_indices_train': train_dataset.valid_indices,
+            'valid_indices_val': val_dataset.valid_indices if val_dataset is not None else None
+        }
+
+    elif model_type == 'hybrid_gat_bert':
+        if not (GAT_AVAILABLE and CHEMBERTA_AVAILABLE):
+            logger.error(f"{model_key} requires both GAT and ChemBERTa components.")
+            return None
+        if smiles_train is None:
+            logger.error(f"SMILES data required for {model_key}")
+            return None
+
+        bert_model_name = model_config['params'].get('bert_model_name', "DeepChem/ChemBERTa-77M-MLM")
+        shared_bert_encoder = ChemBERTaEncoder(bert_model_name, dropout=model_config['params'].get('dropout', 0.3))
+        tokenizer = shared_bert_encoder.tokenizer
+        train_dataset = MoleculeDataset(
+            smiles_train, y_train, logger=logger,
+            tokenizer=tokenizer, max_length=shared_bert_encoder.max_length, return_extra=True
+        )
+        if len(train_dataset) == 0:
+            logger.error(f"{model_key}: no valid training graphs after SMILES->graph conversion.")
+            return None
+
+        inferred_node_dim = int(train_dataset.graphs[0].x.shape[1])
+        inferred_edge_dim = int(train_dataset.graphs[0].edge_attr.shape[1]) if hasattr(train_dataset.graphs[0], "edge_attr") else 0
+        gat_params = dict(model_config['params'].get('gat_params', {}))
+        gat_params['num_node_features'] = inferred_node_dim
+        gat_params['num_edge_features'] = inferred_edge_dim
+
+        fusion_params = dict(model_config['params'])
+        fusion_params['gat_params'] = gat_params
+        fusion_params['bert_model_name'] = bert_model_name
+        fusion_params['bert_encoder'] = shared_bert_encoder
+
+        model = model_config['model_class'](**fusion_params)
+
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=hybrid_collate_fn)
+        y_train_filtered = y_train[train_dataset.valid_indices]
+
+        val_loader = None
+        val_dataset = None
+        y_val_filtered = None
+        if smiles_val is not None and len(smiles_val) > 0:
+            val_dataset = MoleculeDataset(
+                smiles_val, y_val, logger=logger,
+                tokenizer=tokenizer, max_length=shared_bert_encoder.max_length, return_extra=True
+            )
+            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=hybrid_collate_fn)
+            y_val_filtered = y_val[val_dataset.valid_indices]
+
+        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
+
+        y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
+        y_pred_val, y_proba_val = (predict_pytorch_model(model, val_loader, task, threshold=threshold)
+                                   if val_loader is not None else (None, None))
+
+        return {
+            'model': model,
+            'y_pred_train': y_pred_train,
+            'y_proba_train': y_proba_train,
+            'y_pred_val': y_pred_val,
+            'y_proba_val': y_proba_val,
+            'valid_indices_train': train_dataset.valid_indices,
+            'valid_indices_val': val_dataset.valid_indices if val_dataset is not None else None
+        }
+
     # ===== Transformer ChemBERTa =====
     elif model_type == 'transformer':
         if smiles_train is None:
@@ -2192,10 +2647,20 @@ def _save_pytorch_model(model, path: Path, model_type: str):
     elif model_type == 'pytorch_geometric':
         torch.save(model.state_dict(), path.with_suffix('.pt'))
     elif model_type == 'transformer':
-        # For ChemBERTa model: model.model contains the AutoModelForSequenceClassification
-        # which already includes the classification head, so save everything together
         model.model.save_pretrained(str(path.with_suffix('')))
         model.tokenizer.save_pretrained(str(path.with_suffix('')))
+    elif model_type == 'hybrid_gat_fp':
+        torch.save(model.state_dict(), path.with_suffix('.pt'))
+    elif model_type == 'hybrid_gat_bert':
+        torch.save(model.state_dict(), path.with_suffix('.pt'))
+        bert_encoder = getattr(model, "bert_encoder", None)
+        if bert_encoder is not None:
+            tokenizer_obj = getattr(bert_encoder, "tokenizer", None)
+            hf_model = getattr(bert_encoder, "model", None)
+            if hf_model is not None:
+                hf_model.save_pretrained(str(path.with_suffix('')))
+            if tokenizer_obj is not None:
+                tokenizer_obj.save_pretrained(str(path.with_suffix('')))
 
 def _save_sklearn_model(model, path: Path):
     """Save sklearn model"""
@@ -2904,6 +3369,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
 
         # Determine if this is a traditional or deep learning model
         model_type_category = 'deep_learning' if model_config['type'] in ['pytorch', 'pytorch_geometric', 'transformer'] else 'traditional'
+        model_modality = get_model_modality(model_config)
         
         logger.info(f"\n--- {fold_prefix}Training {model_key} with {len(config.seeds)} seeds ---")
         
@@ -3042,6 +3508,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                 'fold': fold_idx,
                 'model': model_key,
                 'model_type': model_type_category,
+                'modality': model_modality,
                 'seed': seed,
                 **{f'{k}_val': v for k, v in val_metrics.items()},
                 **{f'{k}_train': v for k, v in train_metrics.items()}
@@ -3095,13 +3562,14 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
         logger.info(f"\n{fold_prefix}Aggregating results for {model_key} across {len(seed_results)} seeds")
         
         # Get all metric keys (excluding fold, model, model_type, seed)
-        metric_keys = [k for k in seed_results[0].keys() if k not in ['fold', 'model', 'model_type', 'seed']]
+        metric_keys = [k for k in seed_results[0].keys() if k not in ['fold', 'model', 'model_type', 'modality', 'seed']]
         
         # Calculate mean and std for each metric
         aggregated_result = {
             'fold': fold_idx,
             'model': model_key,
             'model_type': model_type_category,
+            'modality': model_modality,
             'num_seeds': len(seed_results)
         }
         
@@ -3578,7 +4046,11 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             # Calculate mean and std for each metric
             cv_summary = []
             for model_name, fold_results_list in model_cv_results.items():
-                summary_row = {'model': model_name, 'model_type': fold_results_list[0]['model_type']}
+                summary_row = {
+                    'model': model_name,
+                    'model_type': fold_results_list[0]['model_type'],
+                    'modality': fold_results_list[0].get('modality', 'fingerprint')
+                }
 
                 # Check if results are already aggregated (contain _mean and _std suffixes)
                 # This happens when train_single_fold has already aggregated across seeds
@@ -3624,7 +4096,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                         summary_row[f'{base_metric}_mean'] = pooled_mean
                         summary_row[f'{base_metric}_std'] = float(np.sqrt(max(pooled_var, 0.0)))
                 else:
-                    exclude_keys = ['fold', 'model', 'model_type', 'num_seeds', 'seed']
+                    exclude_keys = ['fold', 'model', 'model_type', 'modality', 'num_seeds', 'seed']
                     metric_keys = [k for k in fold_results_list[0].keys() if k not in exclude_keys]
 
                     for metric_key in metric_keys:
@@ -3695,8 +4167,6 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         all_ext_test_predictions = []  # Store all predictions
         trained_models = {}  # Store trained model objects for saving (best seed per model)
         model_best_seed = {}  # Track best seed used for each model object in trained_models
-        best_traditional = None
-        best_deep_learning = None
 
         # Metric direction for model selection (used for both best-seed tracking and model ranking)
         lower_is_better = {'RMSE', 'MAE'}
@@ -3711,6 +4181,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         for model_key in valid_models:
             model_config = registry[model_key]
             model_type_category = 'deep_learning' if model_config['type'] in ['pytorch', 'pytorch_geometric', 'transformer'] else 'traditional'
+            model_modality = get_model_modality(model_config)
             
             logger.info(f"\n{'='*60}")
             logger.info(f"Model: {model_key}")
@@ -3731,7 +4202,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 set_all_seeds(seed, logger)
                 scaler = None
                 
-                if model_config['type'] in ['sklearn', 'pytorch']:
+                if model_config['type'] in ['sklearn', 'pytorch', 'hybrid_gat_fp']:
                     if X_dev_for_ext_test is not None and X_ext_test_for_ext_test is not None:
                         X_train_final, X_test_final, scaler = prepare_features_for_model(
                             model_key,
@@ -3743,6 +4214,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                     else:
                         X_train_final = None
                         X_test_final = None
+                elif model_config['type'] in ['hybrid_gat_bert', 'pytorch_geometric', 'transformer']:
+                    X_train_final = None
+                    X_test_final = None
+
                 else:
                     X_train_final = None
                     X_test_final = None
@@ -3778,28 +4253,17 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 smiles_ext_test_for_metrics = smiles_ext_test
 
                 # Make predictions on External Test Set
-                if model_config['type'] in ['pytorch_geometric', 'transformer', 'pytorch']:
+                if model_config['type'] in ['pytorch_geometric', 'transformer', 'pytorch', 'hybrid_gat_fp', 'hybrid_gat_bert']:
                     # For GAT, ChemBERTa, and MLP, we need to create a dataset/data loader
+                    valid_indices = None
                     if model_config['type'] == 'pytorch_geometric':
                         test_dataset = MoleculeDataset(smiles_ext_test, y_ext_test, logger=logger)
                         valid_indices = getattr(test_dataset, "valid_indices", None)
-                        if valid_indices is not None:
-                            y_ext_test_for_metrics = y_ext_test[valid_indices]
-                            if ids_ext_test is not None:
-                                ids_ext_test_for_metrics = [ids_ext_test[i] for i in valid_indices]
-                            if smiles_ext_test is not None:
-                                smiles_ext_test_for_metrics = [smiles_ext_test[i] for i in valid_indices]
                         test_loader = GeometricDataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
                     elif model_config['type'] == 'transformer':
                         model = model_result['model']
                         test_dataset = ChemBERTaDataset(smiles_ext_test, y_ext_test, model.tokenizer)
                         valid_indices = getattr(test_dataset, "valid_indices", None)
-                        if valid_indices is not None:
-                            y_ext_test_for_metrics = y_ext_test[valid_indices]
-                            if ids_ext_test is not None:
-                                ids_ext_test_for_metrics = [ids_ext_test[i] for i in valid_indices]
-                            if smiles_ext_test is not None:
-                                smiles_ext_test_for_metrics = [smiles_ext_test[i] for i in valid_indices]
                         max_length_test = getattr(test_dataset, "max_length", 128)
                         test_loader = DataLoader(
                             test_dataset,
@@ -3807,10 +4271,60 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                             shuffle=False,
                             collate_fn=lambda b, ml=max_length_test: chemberta_collate_fn(b, max_length=ml)
                         )
+                    elif model_config['type'] == 'hybrid_gat_fp':
+                        fp_dim = getattr(model_result['model'], "fp_encoder", None)
+                        if fp_dim is not None:
+                            fp_dim = fp_dim.blocks[0].linear.in_features
+                        else:
+                            fp_dim = 2048
+                        fp_ext = X_ext_test_for_ext_test
+                        if fp_ext is None:
+                            fp_ext = compute_morgan_fingerprints(smiles_ext_test, n_bits=fp_dim, logger=logger)
+                        test_dataset = MoleculeDataset(
+                            smiles_ext_test,
+                            y_ext_test,
+                            logger=logger,
+                            extra_fp_features=fp_ext,
+                            tokenizer=None,
+                            return_extra=True
+                        )
+                        valid_indices = getattr(test_dataset, "valid_indices", None)
+                        test_loader = DataLoader(
+                            test_dataset,
+                            batch_size=config.batch_size,
+                            shuffle=False,
+                            collate_fn=hybrid_collate_fn
+                        )
+                    elif model_config['type'] == 'hybrid_gat_bert':
+                        hybrid_model = model_result['model']
+                        bert_encoder = getattr(hybrid_model, "bert_encoder", None)
+                        tokenizer = getattr(bert_encoder, "tokenizer", None)
+                        max_length_test = getattr(bert_encoder, "max_length", 128)
+                        test_dataset = MoleculeDataset(
+                            smiles_ext_test,
+                            y_ext_test,
+                            logger=logger,
+                            tokenizer=tokenizer,
+                            max_length=max_length_test,
+                            return_extra=True
+                        )
+                        valid_indices = getattr(test_dataset, "valid_indices", None)
+                        test_loader = DataLoader(
+                            test_dataset,
+                            batch_size=config.batch_size,
+                            shuffle=False,
+                            collate_fn=hybrid_collate_fn
+                        )
                     else:  # pytorch (MLP)
                         test_dataset = TensorDataset(torch.tensor(X_test_final, dtype=torch.float32), 
                                                     torch.tensor(y_ext_test, dtype=torch.float32))
                         test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+                    if valid_indices is not None:
+                        y_ext_test_for_metrics = y_ext_test[valid_indices]
+                        if ids_ext_test is not None:
+                            ids_ext_test_for_metrics = [ids_ext_test[i] for i in valid_indices]
+                        if smiles_ext_test is not None:
+                            smiles_ext_test_for_metrics = [smiles_ext_test[i] for i in valid_indices]
                     
                     y_pred_ext_test, y_proba_ext_test = predict_pytorch_model(
                         model_result['model'], test_loader, config.task, threshold=decision_threshold
@@ -3838,6 +4352,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                 seed_result = {
                     'model': model_key,
                     'model_type': model_type_category,
+                    'modality': model_modality,
                     'seed': seed,
                     'n_ext_test_samples': len(y_ext_test_for_metrics) if y_ext_test_for_metrics is not None else 0,
                     **ext_test_metrics  # All metrics without _ext_test suffix
@@ -3928,7 +4443,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             
             # Calculate mean and std across seeds
             logger.info(f"\n--- {model_key} Multi-Seed Summary ---")
-            metric_keys = [k for k in model_seed_results[0].keys() if k not in ['model', 'model_type', 'seed', 'n_ext_test_samples']]
+            metric_keys = [k for k in model_seed_results[0].keys() if k not in ['model', 'model_type', 'modality', 'seed', 'n_ext_test_samples']]
             
             for metric_key in metric_keys:
                 values = [r[metric_key] for r in model_seed_results]
@@ -3974,8 +4489,13 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             if not model_seed_results_list:
                 continue
             
-            summary_row = {'model': model_name, 'model_type': model_seed_results_list[0]['model_type'], 'num_seeds': len(model_seed_results_list)}
-            metric_keys = [k for k in model_seed_results_list[0].keys() if k not in ['model', 'model_type', 'seed', 'n_ext_test_samples']]
+            summary_row = {
+                'model': model_name,
+                'model_type': model_seed_results_list[0]['model_type'],
+                'modality': model_seed_results_list[0].get('modality', 'fingerprint'),
+                'num_seeds': len(model_seed_results_list)
+            }
+            metric_keys = [k for k in model_seed_results_list[0].keys() if k not in ['model', 'model_type', 'modality', 'seed', 'n_ext_test_samples']]
             
             for metric_key in metric_keys:
                 values = [r[metric_key] for r in model_seed_results_list]
@@ -3995,17 +4515,9 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info("External Test Set Results Summary")
         logger.info(f"{'='*60}")
         
-        # Get metric keys for external test set summary table
         ext_test_metric_key = f'{config.external_test_metric}_mean'
         ext_test_metric_std_key = f'{config.external_test_metric}_std'
 
-        # Separate traditional and deep learning models based on mean performance
-        traditional_summary = [r for r in summary_results if r['model_type'] == 'traditional']
-        deep_learning_summary = [r for r in summary_results if r['model_type'] == 'deep_learning']
-        
-        best_traditional = None
-        best_deep_learning = None
-        
         def _select_best(rows: List[Dict[str, Any]]):
             best_row = None
             best_val = None
@@ -4052,75 +4564,69 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             except Exception:
                 return f"{mean_f:.4f}"
 
-        if traditional_summary:
-            best_traditional = _select_best(traditional_summary)
-            if best_traditional is not None:
-                logger.info(f"\nBest Traditional Model: {best_traditional['model']} ({config.external_test_metric}={_format_metric_with_std(best_traditional)})")
-            else:
-                logger.warning("\nBest Traditional Model selection failed (no valid metric values).")
-        
-        if deep_learning_summary:
-            best_deep_learning = _select_best(deep_learning_summary)
-            if best_deep_learning is not None:
-                logger.info(f"Best Deep Learning Model: {best_deep_learning['model']} ({config.external_test_metric}={_format_metric_with_std(best_deep_learning)})")
-            else:
-                logger.warning("Best Deep Learning Model selection failed (no valid metric values).")
-        
-        # Save best models
-        if best_traditional or best_deep_learning:
+        modality_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for row in summary_results:
+            modality = str(row.get('modality', 'fingerprint') or 'fingerprint').lower()
+            modality_groups.setdefault(modality, []).append(row)
+
+        best_by_modality: Dict[str, Dict[str, Any]] = {}
+        for modality, rows in modality_groups.items():
+            best_row = _select_best(rows)
+            if best_row is None:
+                continue
+            best_by_modality[modality] = best_row
+            display_modality = modality.replace('_', ' ').title()
+            logger.info(
+                f"\nBest {display_modality} Model: {best_row['model']} "
+                f"({config.external_test_metric}={_format_metric_with_std(best_row)})"
+            )
+
+        missing_modalities = [m for m in EXPECTED_MODALITIES if m not in best_by_modality]
+        if missing_modalities:
+            logger.info(f"No best model identified for modalities: {', '.join(missing_modalities)}")
+
+        if best_by_modality:
             best_model_dir = out_dir / "models" / "best_models"
             best_model_dir.mkdir(parents=True, exist_ok=True)
             
             logger.info(f"\n{'='*60}")
-            logger.info("Saving Best Models")
+            logger.info("Saving Best Models by Modality")
             logger.info(f"{'='*60}")
-            
-            # Save best traditional model
-            if best_traditional is not None:
-                model_key = best_traditional['model']
-                if model_key in trained_models:
-                    model_path = best_model_dir / f"best_traditional_{model_key}"
+
+            for modality, best_row in best_by_modality.items():
+                model_key = best_row['model']
+                display_modality = modality.replace('_', ' ').title()
+                if model_key not in trained_models:
+                    logger.warning(f"  ✗ Model object not found for {model_key} ({display_modality} path)")
+                    continue
+                model_path = best_model_dir / f"best_{modality}_model_{model_key}"
+                model_config = registry.get(model_key, {})
+                model_type = model_config.get('type', 'sklearn')
+                if model_type == 'sklearn':
                     _save_sklearn_model(trained_models[model_key], model_path)
-                    logger.info(
-                        f"  ✓ Saved best traditional model: {model_key} "
-                        f"(seed={model_best_seed.get(model_key, 'N/A')}, "
-                        f"{config.external_test_metric}={_format_metric_with_std(best_traditional)})"
-                    )
                 else:
-                    logger.warning(f"  ✗ Model object not found for {model_key}")
-            
-            # Save best deep learning model
-            if best_deep_learning is not None:
-                model_key = best_deep_learning['model']
-                if model_key in trained_models:
-                    model_path = best_model_dir / f"best_deep_learning_{model_key}"
-                    model_config = registry.get(model_key)
-                    if model_config:
-                        model_type = model_config.get('type', 'pytorch')
-                        _save_pytorch_model(trained_models[model_key], model_path, model_type)
-                        logger.info(
-                            f"  ✓ Saved best deep learning model: {model_key} "
-                            f"(seed={model_best_seed.get(model_key, 'N/A')}, "
-                            f"{config.external_test_metric}={_format_metric_with_std(best_deep_learning)})"
-                        )
-                else:
-                    logger.warning(f"  ✗ Model object not found for {model_key}")
-            
-            # If one of the branches is missing, save the overall best model as well
-            if best_traditional is None or best_deep_learning is None:
-                logger.info(f"\nNote: One model type branch is missing. Saving overall best model as backup.")
-                # Use the mean-over-seeds summary table (it contains *_mean keys).
-                overall_best = _select_best(summary_results)
-                if overall_best is None:
-                    logger.warning("Overall best model selection failed (no valid metric values). Skipping save.")
-                    overall_best = {}
+                    _save_pytorch_model(trained_models[model_key], model_path, model_type)
+                logger.info(
+                    f"  ✓ Saved best {display_modality} model: {model_key} "
+                    f"(seed={model_best_seed.get(model_key, 'N/A')}, "
+                    f"{config.external_test_metric}={_format_metric_with_std(best_row)})"
+                )
+        else:
+            logger.warning("No modality-specific best models could be determined. Attempting to save the overall best model as a fallback.")
+            overall_best = _select_best(summary_results)
+            if overall_best is None:
+                logger.warning("Overall best model selection failed (no valid metric values). Skipping save.")
+                overall_best = {}
+            else:
                 model_key = overall_best.get('model')
                 if model_key in trained_models:
+                    best_model_dir = out_dir / "models" / "best_models"
+                    best_model_dir.mkdir(parents=True, exist_ok=True)
                     model_path = best_model_dir / f"best_overall_{model_key}"
                     model_config = registry.get(model_key)
                     if model_config:
                         model_type = model_config.get('type', 'pytorch')
-                        if model_type in ['sklearn']:
+                        if model_type == 'sklearn':
                             _save_sklearn_model(trained_models[model_key], model_path)
                         else:
                             _save_pytorch_model(trained_models[model_key], model_path, model_type)
@@ -4129,7 +4635,6 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
                             f"(seed={model_best_seed.get(model_key, 'N/A')}, "
                             f"{config.external_test_metric}={_format_metric_with_std(overall_best)})"
                         )
-        
         # Save feature processors
         # Save the global feature mask and feature names from Stage 2
         if dev_feature_mask is not None:
@@ -4268,59 +4773,60 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
     # Note: Model saving and SHAP analysis are not implemented for k-fold CV unless
     # `--save-cv-details` is set, which persists fold/seed artifacts under `cv_data/`.
     if not use_cv:
-        # Find best models (separate for traditional and deep learning)
-        # Check if results are already aggregated (contain _mean suffix)
         if all_fold_results and any('_mean' in k for k in all_fold_results[0].keys()):
-            # Results are aggregated, use _mean metrics
-            if config.task == "classification":
-                metric = 'AUC_val_mean'
-            else:
-                metric = 'R2_val_mean'
+            metric = 'AUC_val_mean' if config.task == "classification" else 'R2_val_mean'
         else:
-            # Results are not aggregated, use regular metrics
-            if config.task == "classification":
-                metric = 'AUC_val'
-            else:
-                metric = 'R2_val'
-        
-        traditional_results = [r for r in all_fold_results if r['model_type'] == 'traditional']
-        deep_learning_results = [r for r in all_fold_results if r['model_type'] == 'deep_learning']
-        
-        best_traditional = None
-        best_deep_learning = None
-        
-        if traditional_results:
-            best_traditional = max(traditional_results, key=lambda x: x.get(metric, -float('inf')))
-            logger.info(f"\nBest Traditional Model: {best_traditional['model']} ({metric}={best_traditional.get(metric, 'N/A'):.4f})")
-        
-        if deep_learning_results:
-            best_deep_learning = max(deep_learning_results, key=lambda x: x.get(metric, -float('inf')))
-            logger.info(f"Best Deep Learning Model: {best_deep_learning['model']} ({metric}={best_deep_learning.get(metric, 'N/A'):.4f})")
-        
-        # Save best models
+            metric = 'AUC_val' if config.task == "classification" else 'R2_val'
+
+        def _select_best(rows_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            best_row = None
+            best_value = -float('inf')
+            for row in rows_list:
+                val = row.get(metric)
+                if val is None:
+                    continue
+                try:
+                    val_f = float(val)
+                except Exception:
+                    continue
+                if np.isnan(val_f) or np.isinf(val_f):
+                    continue
+                if best_row is None or val_f > best_value:
+                    best_row = row
+                    best_value = val_f
+            return best_row
+
+        modality_groups = {}
+        for row in all_fold_results:
+            modality = str(row.get('modality', 'fingerprint') or 'fingerprint').lower()
+            modality_groups.setdefault(modality, []).append(row)
+
+        best_by_modality = {}
+        for modality, rows in modality_groups.items():
+            best_row = _select_best(rows)
+            if not best_row:
+                continue
+            best_by_modality[modality] = best_row
+            display_modality = modality.replace('_', ' ').title()
+            logger.info(f"\nBest {display_modality} Model: {best_row['model']} ({metric}={best_row.get(metric, 'N/A'):.4f})")
+
         best_model_dir = out_dir / "models" / "best_models"
         best_model_dir.mkdir(parents=True, exist_ok=True)
-        
-        if best_traditional:
-            # Get the model object from the results
+
+        for modality, best_row in best_by_modality.items():
+            model_key = best_row['model']
+            display_modality = modality.replace('_', ' ').title()
             for result in all_fold_results:
-                if result['model'] == best_traditional['model'] and 'model' in result:
-                    model_path = best_model_dir / f"best_traditional_{best_traditional['model']}"
-                    _save_sklearn_model(result['model'], model_path)
-                    logger.info(f"  ✓ Saved best traditional model: {best_traditional['model']}")
-                    break
-        
-        if best_deep_learning:
-            # Get the model object from the results
-            for result in all_fold_results:
-                if result['model'] == best_deep_learning['model'] and 'model' in result:
-                    model_path = best_model_dir / f"best_deep_learning_{best_deep_learning['model']}"
-                    # Determine model type for proper saving
-                    model_config = registry.get(best_deep_learning['model'])
-                    if model_config:
-                        model_type = model_config.get('type', 'pytorch')
-                        _save_pytorch_model(result['model'], model_path, model_type)
-                        logger.info(f"  ✓ Saved best deep learning model: {best_deep_learning['model']}")
+                if result['model'] == model_key and 'model' in result:
+                    model_path = best_model_dir / f"best_{modality}_model_{model_key}"
+                    if result.get('model_type') == 'traditional':
+                        _save_sklearn_model(result['model'], model_path)
+                    else:
+                        model_config = registry.get(model_key)
+                        if model_config:
+                            model_type = model_config.get('type', 'pytorch')
+                            _save_pytorch_model(result['model'], model_path, model_type)
+                    logger.info(f"  ✓ Saved best {display_modality} model: {model_key}")
                     break
         
         # SHAP analysis for best models
@@ -4455,6 +4961,35 @@ def generate_fingerprints_from_csv(df: pd.DataFrame, smiles_column: str,
         logger.info(f"Total fingerprint columns added: {total_fp_cols}")
     
     return df_with_fp
+
+
+def compute_morgan_fingerprints(smiles_list: List[str], radius: int = 2, n_bits: int = 2048,
+                                logger: Optional[logging.Logger] = None) -> np.ndarray:
+    """
+    Compute Morgan fingerprints (bit vectors) for a list of SMILES strings.
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError as exc:
+        if logger:
+            logger.error(f"RDKit required for Morgan fingerprint computation: {exc}")
+        raise
+
+    fingerprints = []
+    for smiles in smiles_list:
+        if not smiles:
+            fingerprints.append(np.zeros(n_bits, dtype=np.float32))
+            continue
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            fingerprints.append(np.zeros(n_bits, dtype=np.float32))
+            continue
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits)
+        arr = np.array(fp, dtype=np.float32)
+        fingerprints.append(arr)
+
+    return np.stack(fingerprints, axis=0)
 
 def validate_smiles(smiles_list: List[str], logger: logging.Logger = None) -> Tuple[List[bool], List[int]]:
     """

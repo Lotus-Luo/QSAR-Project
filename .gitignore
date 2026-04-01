@@ -41,5 +41,4 @@ Scripts/step00_data_clean.ipynb
 Environment/env_install_suse.txt
 
 # ignore specific target config yaml files
-Config/test_config.yaml
 Config/nsd2_config.yaml

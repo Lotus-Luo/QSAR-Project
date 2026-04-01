@@ -74,7 +74,7 @@ seeds: [42]
 # Multiple random split seeds (Stage 1/2)
 # Each seed reruns the Dev/External split plus CV folds; outputs go under `split_seed_<seed>/`.
 # Aggregated summaries and row-level data appear in `results/all_split_*` and `results/all_split_row_data.csv`.
-split_seeds: [3, 30, 2026]
+split_seeds: [4, 1, 2026]
 
 # Method for splitting data into train/validation/test sets
 # Options:
@@ -141,7 +141,7 @@ external_test_metric: "MCC"
 #   selected_models: ["MLP", "GAT", "ChemBERTa"]      # Deep learning only
 #   selected_models: ["LR","RFC","SVC","XGBC","ETC"]   # Traditional only
 #   selected_models: []                               # Train all available models
-selected_models: ["XGBC", "RFC", "MLP","GAT","ChemBERTa","LR","SVC","ETC"]
+selected_models: ["GAT","ChemBERTa","LR","MLP","Hybrid_GAT_FP","Hybrid_GAT_BERT"]
 
 # ------------------------------------------------------------------------------
 # Output Configuration
@@ -226,13 +226,13 @@ classification_threshold: 0.5
 # Leave empty (`{}`) to use each estimator's default weighting.
 model_param_overrides:
   LR:
-    class_weight: {0: 0.71, 1: 0.29}
+    class_weight: {}
   RFC:
     class_weight: balanced
   SVC:
     class_weight: balanced
   XGBC:
-    scale_pos_weight: 0.41
+    scale_pos_weight: null
   LGBMC:
     class_weight: balanced
   ETC:
@@ -240,9 +240,9 @@ model_param_overrides:
 
 # Deep learning loss scaling
 # `deep_learning_pos_weight` defaults to null (no pos_weight). Set to neg/pos ratio to bias BCE loss.
-deep_learning_pos_weight: 0.41
+deep_learning_pos_weight: null
 # `deep_learning_class_weights` list is interpreted as [weight_for_class_0, weight_for_class_1] and used only when `pos_weight` is unset.
-deep_learning_class_weights: [0.709, 0.291]
+deep_learning_class_weights: []
 
 # ------------------------------------------------------------------------------
 # Early Enrichment Factor Configuration
