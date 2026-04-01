@@ -239,7 +239,27 @@ class QSARConfig:
     n_jobs: int = -1
     batch_size: int = 32
     learning_rate: float = 0.001
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 25
+    deep_learning_weight_decay: float = 1e-2
+    gat_hyperparams: Dict[str, Any] = field(default_factory=lambda: {
+        'hidden_dim': 64,
+        'num_heads': 4,
+        'num_layers': 3,
+        'dropout': 0.3,
+        'learning_rate': 0.001,
+        'weight_decay': 0.01,
+    })
+    chemberta_hyperparams: Dict[str, Any] = field(default_factory=lambda: {
+        'model_name': 'DeepChem/ChemBERTa-77M-MLM',
+        'dropout': 0.1,
+        'freeze_transformer_layers': 10,
+        'learning_rate': 5e-5,
+        'weight_decay': 0.01,
+    })
+    smiles_augmentation: Dict[str, Any] = field(default_factory=lambda: {
+        'enabled': True,
+        'variants_per_molecule': 10,
+    })
     config_file: str = ""
     split_seeds: List[int] = field(default_factory=lambda: [42])
     save_train_features: bool = False  # Whether to persist Development-set features/labels for downstream AD scripts
@@ -1372,12 +1392,7 @@ def hybrid_collate_fn(batch):
 
 # --------- ChemBERTa Model ---------
 try:
-    from transformers import (
-        AutoTokenizer,
-        AutoModelForSequenceClassification,
-        AutoModel,
-        RobertaForSequenceClassification
-    )
+    from transformers import AutoTokenizer, AutoModel
     # DeepChem/ChemBERTa-77M-MLM, DeepChem/ChemBERTa-77M-MTR, seyonec/ChemBERTa-zinc-base-v1
     def _resolve_chemberta_load_path(model_name: str) -> Tuple[str, bool]:
         model_name_mapping = {
@@ -1401,20 +1416,32 @@ try:
         return model_name, False
 
 
+    def _freeze_transformer_layers(model, n_layers: int) -> int:
+        if n_layers <= 0:
+            return 0
+        encoder = getattr(model, 'encoder', None)
+        if encoder is None or not hasattr(encoder, 'layer'):
+            return 0
+        frozen_layers = 0
+        for idx, layer in enumerate(encoder.layer):
+            if idx >= n_layers:
+                break
+            for param in layer.parameters():
+                param.requires_grad = False
+            frozen_layers += 1
+        return frozen_layers
+
+
     class ChemBERTaModel(nn.Module):
         """
-        ChemBERTa Transformer for molecular property prediction using AutoModelForSequenceClassification.
-        
-        Features:
-        - Local-first loading strategy: Prioritizes loading locally.
-        - Full fine-tuning support: Support full parameter fine-tuning
-        - GPU/CPU fallback: Automatically adapts to GPU operation and falls back to CPU when there is no GPU
-        
-        Args:
-            model_name: Hugging Face model name or local path. Default: 'DeepChem/ChemBERTa-77M-MTR'
-            num_labels: Number of output labels (1 for binary classification)
+        ChemBERTa Transformer for molecular property prediction with a custom head.
+        Allows freezing early transformer layers while fine-tuning the classification head.
         """
-        def __init__(self, model_name: str = "DeepChem/ChemBERTa-77M-MLM", num_labels: int = 1):
+        def __init__(self,
+                     model_name: str = "DeepChem/ChemBERTa-77M-MLM",
+                     num_labels: int = 1,
+                     dropout: float = 0.3,
+                     freeze_transformer_layers: int = 0):
             super(ChemBERTaModel, self).__init__()
 
             load_path, use_local = _resolve_chemberta_load_path(model_name)
@@ -1429,35 +1456,34 @@ try:
                 load_path,
                 local_files_only=use_local
             )
-            
-            # Use AutoModelForSequenceClassification which already includes a classification head
-            # ignore_mismatched_sizes=True allows loading models with different classification head dimensions
-            # local_files_only only applies when using local path to prevent unintended downloads
-            self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model = AutoModel.from_pretrained(
                 load_path,
-                num_labels=num_labels,
-                ignore_mismatched_sizes=True,
                 local_files_only=use_local
             )
+            self.hidden_size = self.model.config.hidden_size
+            self.classifier = nn.Sequential(
+                nn.LayerNorm(self.hidden_size),
+                nn.Dropout(dropout),
+                nn.Linear(self.hidden_size, 1)
+            )
+            self.freeze_transformer_layers = freeze_transformer_layers
+            self.frozen_layers = 0
+            if self.freeze_transformer_layers > 0:
+                self.frozen_layers = _freeze_transformer_layers(self.model, self.freeze_transformer_layers)
+                print(f"[INFO] ChemBERTaModel: freezed first {self.frozen_layers} transformer layer(s)")
 
         def forward(self, input_ids, attention_mask):
-            """
-            Forward pass through ChemBERTa model
-            
-            Args:
-                input_ids: Tokenized input IDs [batch_size, seq_len]
-                attention_mask: Attention mask [batch_size, seq_len]
-            
-            Returns:
-                Logits [batch_size] for binary classification
-            """
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
-            return logits.squeeze(-1)
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            pooled = outputs.pooler_output
+            if pooled is None:
+                pooled = outputs.last_hidden_state.mean(dim=1)
+            logits = self.classifier(pooled).squeeze(-1)
+            return logits
 
     class ChemBERTaEncoder(nn.Module):
         """ChemBERTa encoder returning pooled features for fusion"""
-        def __init__(self, model_name: str = "DeepChem/ChemBERTa-77M-MLM", dropout: float = 0.1):
+        def __init__(self, model_name: str = "DeepChem/ChemBERTa-77M-MLM", dropout: float = 0.1,
+                     freeze_transformer_layers: int = 0):
             super(ChemBERTaEncoder, self).__init__()
             load_path, use_local = _resolve_chemberta_load_path(model_name)
             if use_local:
@@ -1469,6 +1495,11 @@ try:
             self.dropout = nn.Dropout(dropout)
             self.hidden_size = self.model.config.hidden_size
             self.max_length = getattr(self.tokenizer, "model_max_length", 128)
+            self.freeze_transformer_layers = freeze_transformer_layers
+            self.frozen_layers = 0
+            if self.freeze_transformer_layers > 0:
+                self.frozen_layers = _freeze_transformer_layers(self.model, self.freeze_transformer_layers)
+                print(f"[INFO] ChemBERTaEncoder: freezed first {self.frozen_layers} transformer layer(s)")
 
         def forward(self, input_ids, attention_mask):
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
@@ -1487,10 +1518,15 @@ try:
                      dropout: float = 0.3,
                      freeze_gat: bool = False,
                      freeze_bert: bool = False,
+                     freeze_transformer_layers: int = 0,
                      bert_encoder: Optional['ChemBERTaEncoder'] = None):
             super(HybridGATChemBERTaFusionModel, self).__init__()
             self.gat_encoder = GATEncoder(**gat_params)
-            self.bert_encoder = bert_encoder or ChemBERTaEncoder(bert_model_name, dropout=dropout)
+            self.bert_encoder = bert_encoder or ChemBERTaEncoder(
+                bert_model_name,
+                dropout=dropout,
+                freeze_transformer_layers=freeze_transformer_layers
+            )
             fusion_input = self.gat_encoder.output_dim + self.bert_encoder.hidden_size
             self.fusion_head = ResidualMLP(
                 input_dim=fusion_input,
@@ -1653,6 +1689,116 @@ def chemberta_collate_fn(batch, max_length: int = 128):
         'label': torch.stack([item['label'] for item in valid_batch])
     }
 
+# Augmentation helpers
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_learning_rate(value: Any, default: float) -> float:
+    lr = _coerce_float(value, default)
+    return lr if lr > 0.0 else default
+
+
+def _coerce_non_negative(value: Any, default: float) -> float:
+    candidate = _coerce_float(value, default)
+    return candidate if candidate >= 0.0 else default
+
+
+class SMILES_Enumerator:
+    """Generates canonical randomized SMILES variants for training folds."""
+
+    def __init__(self, variants_per_molecule: int = 1, seed: Optional[int] = None,
+                 logger: Optional[logging.Logger] = None):
+        self.variants = max(1, int(variants_per_molecule))
+        self.seed = seed
+        self.logger = logger
+
+    def _seed_random(self) -> None:
+        if self.seed is None:
+            return
+        np.random.seed(self.seed)
+        try:
+            import random
+            random.seed(self.seed)
+        except Exception:
+            pass
+
+    def enumerate(self, smiles_list: List[str], labels: np.ndarray,
+                  extra_fp_features: Optional[np.ndarray] = None) -> Tuple[List[str], np.ndarray, Optional[np.ndarray]]:
+        if self.variants <= 1 or not smiles_list:
+            return smiles_list, labels, extra_fp_features
+
+        try:
+            from rdkit import Chem
+        except ImportError:
+            if self.logger:
+                self.logger.warning("RDKit is required for SMILES augmentation but is not installed")
+            return smiles_list, labels, extra_fp_features
+
+        self._seed_random()
+        enumerated_smiles: List[str] = []
+        enumerated_labels: List[float] = []
+        enumerated_fp: List[np.ndarray] = [] if extra_fp_features is not None else []
+        fp_array = np.asarray(extra_fp_features, dtype=np.float32) if extra_fp_features is not None else None
+
+        for idx, smiles in enumerate(smiles_list):
+            if not smiles or str(smiles).strip() == "":
+                continue
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                continue
+
+            for _ in range(self.variants):
+                try:
+                    variant = Chem.MolToSmiles(mol, canonical=True, doRandom=True)
+                except Exception:
+                    continue
+                if not variant:
+                    continue
+                enumerated_smiles.append(variant)
+                enumerated_labels.append(float(labels[idx]))
+                if fp_array is not None:
+                    enumerated_fp.append(fp_array[idx])
+
+        if not enumerated_smiles:
+            return smiles_list, labels, extra_fp_features
+
+        aug_labels = np.asarray(enumerated_labels, dtype=np.float32)
+        aug_fp = np.stack(enumerated_fp, axis=0) if enumerated_fp else None
+
+        if self.logger:
+            self.logger.debug(
+                f"SMILES enumeration expanded {len(smiles_list)} → {len(enumerated_smiles)} samples for training"
+            )
+
+        return enumerated_smiles, aug_labels, aug_fp
+
+
+def _is_smiles_augmentation_enabled(config: QSARConfig) -> bool:
+    aug_cfg = getattr(config, 'smiles_augmentation', {}) or {}
+    return bool(aug_cfg.get('enabled')) and int(aug_cfg.get('variants_per_molecule', 0)) > 1
+
+
+def apply_smiles_augmentation(smiles_list: Optional[List[str]], labels: Optional[np.ndarray],
+                              config: QSARConfig, seed: Optional[int] = None,
+                              extra_fp_features: Optional[np.ndarray] = None,
+                              logger: Optional[logging.Logger] = None) -> Tuple[Optional[List[str]], Optional[np.ndarray], Optional[np.ndarray]]:
+    if smiles_list is None or labels is None or not _is_smiles_augmentation_enabled(config):
+        return smiles_list, labels, extra_fp_features
+
+    aug_cfg = config.smiles_augmentation or {}
+    enumerator = SMILES_Enumerator(
+        variants_per_molecule=aug_cfg.get('variants_per_molecule', 1),
+        seed=seed,
+        logger=logger
+    )
+    labels_array = np.asarray(labels, dtype=np.float32)
+    return enumerator.enumerate(smiles_list, labels_array, extra_fp_features=extra_fp_features)
+
+
 # --------- Model Registry ---------
 DEFAULT_MODALITY_MAP = {
     'sklearn': 'fingerprint',
@@ -1678,7 +1824,8 @@ def get_model_modality(model_config: Dict[str, Any]) -> str:
     return DEFAULT_MODALITY_MAP.get(model_config.get('type'), 'fingerprint')
 
 
-def build_model_registry(task: str = "classification", input_dim: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+def build_model_registry(task: str = "classification", input_dim: Optional[int] = None,
+                        config: Optional[QSARConfig] = None) -> Dict[str, Dict[str, Any]]:
     """
     Build model registry with all available models
     
@@ -1686,6 +1833,8 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         Dictionary mapping model keys to model configurations
     """
     registry = {}
+    gat_cfg = getattr(config, 'gat_hyperparams', {}) or {}
+    chemberta_cfg = getattr(config, 'chemberta_hyperparams', {}) or {}
     
     # ===== Traditional Models =====
     from sklearn.linear_model import LogisticRegression, Ridge
@@ -1809,10 +1958,10 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
             'params': {
                 'num_node_features': None,
                 'num_edge_features': None,
-                'hidden_dim': 64,
-                'num_heads': 4,
-                'num_layers': 3,
-                'dropout': 0.3
+                'hidden_dim': gat_cfg.get('hidden_dim', 64),
+                'num_heads': gat_cfg.get('num_heads', 4),
+                'num_layers': gat_cfg.get('num_layers', 3),
+                'dropout': gat_cfg.get('dropout', 0.3)
             }
         }
         registry['Hybrid_GAT_FP'] = {
@@ -1823,15 +1972,15 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
                 'gat_params': {
                     'num_node_features': None,
                     'num_edge_features': None,
-                    'hidden_dim': 64,
-                    'num_heads': 4,
-                    'num_layers': 3,
-                    'dropout': 0.3
+                    'hidden_dim': gat_cfg.get('hidden_dim', 64),
+                    'num_heads': gat_cfg.get('num_heads', 4),
+                    'num_layers': gat_cfg.get('num_layers', 3),
+                    'dropout': gat_cfg.get('dropout', 0.3)
                 },
                 'fingerprint_dim': None,
                 'fp_hidden_dims': [128, 128],
                 'fusion_hidden_dims': [256],
-                'dropout': 0.3,
+                'dropout': gat_cfg.get('dropout', 0.3),
                 'freeze_gat': False,
                 'freeze_fp': False
             }
@@ -1845,16 +1994,17 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
                     'gat_params': {
                         'num_node_features': None,
                         'num_edge_features': None,
-                        'hidden_dim': 64,
-                        'num_heads': 4,
-                        'num_layers': 3,
-                        'dropout': 0.3
+                        'hidden_dim': gat_cfg.get('hidden_dim', 64),
+                        'num_heads': gat_cfg.get('num_heads', 4),
+                        'num_layers': gat_cfg.get('num_layers', 3),
+                        'dropout': gat_cfg.get('dropout', 0.3)
                     },
-                    'bert_model_name': 'DeepChem/ChemBERTa-77M-MLM',
+                    'bert_model_name': chemberta_cfg.get('model_name', 'DeepChem/ChemBERTa-77M-MLM'),
                     'fusion_hidden_dims': [256],
-                    'dropout': 0.3,
+                    'dropout': chemberta_cfg.get('dropout', 0.3),
                     'freeze_gat': False,
-                    'freeze_bert': False
+                    'freeze_bert': False,
+                    'freeze_transformer_layers': chemberta_cfg.get('freeze_transformer_layers', 0)
                 }
             }
     
@@ -1865,8 +2015,10 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
             'modality': 'sequence',
             'model_class': ChemBERTaModel,
             'params': {
-                'model_name': 'DeepChem/ChemBERTa-77M-MLM',
-                'num_labels': 1
+                'model_name': chemberta_cfg.get('model_name', 'DeepChem/ChemBERTa-77M-MLM'),
+                'num_labels': 1,
+                'dropout': chemberta_cfg.get('dropout', 0.1),
+                'freeze_transformer_layers': chemberta_cfg.get('freeze_transformer_layers', 0)
             }
         }
     
@@ -1875,7 +2027,8 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
 # --------- Training Functions ---------
 def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig, 
                        task: str = "classification", logger: logging.Logger = None,
-                       model_type: str = "default") -> nn.Module:
+                       model_type: str = "default",
+                       optimizer_hyperparams: Optional[Dict[str, Any]] = None) -> nn.Module:
     """
     Train PyTorch model with early stopping and model-specific training strategies.
     
@@ -1898,14 +2051,23 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     device = DEVICE
     model = model.to(device)
     threshold = get_classification_threshold(config)
-    
+    optimizer_hyperparams = optimizer_hyperparams or {}
+    chemberta_cfg = getattr(config, 'chemberta_hyperparams', {}) or {}
+    default_weight_decay = getattr(config, 'deep_learning_weight_decay', 0.0)
+
     # ========== Model-specific Training Strategies ==========
     # For ChemBERTa transformer models, use specialized hyperparameters and optimizer
     if model_type == "transformer":
         # AdamW optimizer with weight decay (standard for transformer fine-tuning)
-        base_lr = 5e-5
-        wt_decay = 0.01
-        min_lr = 1e-7
+        base_lr = _coerce_learning_rate(
+            optimizer_hyperparams.get('learning_rate'),
+            chemberta_cfg.get('learning_rate', 5e-5)
+        )
+        wt_decay = _coerce_non_negative(
+            optimizer_hyperparams.get('weight_decay'),
+            chemberta_cfg.get('weight_decay', default_weight_decay)
+        )
+        min_lr = _coerce_learning_rate(optimizer_hyperparams.get('min_lr'), 1e-7)
         optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=wt_decay)
         
         # Cosine Annealing Learning Rate scheduler
@@ -1921,10 +2083,17 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
         current_wd = optimizer.param_groups[0]['weight_decay']
         logger.info(f"  - Optimizer: {type(optimizer).__name__} (lr={current_lr:.1e}, weight_decay={current_wd})")
         logger.info(f"  - Scheduler: {type(scheduler).__name__} (T_max={scheduler.T_max}, eta_min={scheduler.eta_min:.1e})")
-        logger.info("  - Fine-tuning: Full parameter fine-tuning (no frozen layers)")
+        frozen_layers = getattr(model, 'frozen_layers', 0)
+        if frozen_layers:
+            logger.info(f"  - Fine-tuning: head-only (first {frozen_layers} transformer layer(s) frozen)")
+        else:
+            logger.info("  - Fine-tuning: Full parameter fine-tuning (no frozen layers)")
     else:
-        # Default strategy for other deep learning models (MLP, GAT)
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=1e-5)
+        # Default strategy for other deep learning models (MLP, GAT, hybrids)
+        base_lr = _coerce_learning_rate(optimizer_hyperparams.get('learning_rate'), config.learning_rate)
+        wt_decay = optimizer_hyperparams.get('weight_decay', default_weight_decay)
+        wt_decay = _coerce_non_negative(wt_decay, default_weight_decay)
+        optimizer = torch.optim.Adam(model.parameters(), lr=base_lr, weight_decay=wt_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Loss function
@@ -2254,6 +2423,15 @@ def predict_pytorch_model(model, data_loader, task: str = "classification", thre
         all_labels = all_preds
         return all_labels, all_preds
 
+
+def _wrap_result_with_labels(base_result: Dict[str, Any],
+                             training_labels,
+                             validation_labels=None) -> Dict[str, Any]:
+    base_result['training_labels'] = np.asarray(training_labels)
+    base_result['validation_labels'] = np.asarray(validation_labels) if validation_labels is not None else None
+    return base_result
+
+
 # --------- Model Training Wrapper ---------
 def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y_train, 
                        X_val, y_val, config: QSARConfig, task: str = "classification",
@@ -2359,13 +2537,13 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             
             y_pred_val = (y_proba_val >= threshold).astype(int) if task == "classification" else y_proba_val
         
-        return {
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
             'y_pred_val': y_pred_val,
             'y_proba_val': y_proba_val
-        }
+        }, training_labels=y_train, validation_labels=y_val)
     
     # ===== PyTorch MLP =====
     elif model_type == 'pytorch':
@@ -2397,19 +2575,31 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
         
         # Train model with model_type="pytorch"
-        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch")
+        model = train_pytorch_model(
+            model,
+            train_loader,
+            val_loader,
+            config,
+            task,
+            logger,
+            model_type="pytorch",
+            optimizer_hyperparams={
+                'learning_rate': config.learning_rate,
+                'weight_decay': config.deep_learning_weight_decay
+            }
+        )
         
         # Predictions
         y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
         y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
-        return {
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
             'y_pred_val': y_pred_val,
             'y_proba_val': y_proba_val
-        }
+        }, training_labels=y_train, validation_labels=y_val)
     
     # ===== PyTorch Geometric GAT =====
     elif model_type == 'pytorch_geometric':
@@ -2443,6 +2633,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         # Create validation loader only if validation data is provided
         val_loader = None
         y_val_filtered = None
+        val_dataset = None
         if smiles_val is not None and len(smiles_val) > 0:
             val_dataset = MoleculeDataset(smiles_val, y_val, logger=logger)
             val_loader = GeometricDataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
@@ -2450,13 +2641,27 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             y_val_filtered = y_val[val_dataset.valid_indices]
         
         # Train model with model_type="pytorch_geometric"
-        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
+        gat_optimizer_hyperparams = {
+            'learning_rate': config.gat_hyperparams.get('learning_rate', config.learning_rate),
+            'weight_decay': config.gat_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+        }
+        model = train_pytorch_model(
+            model,
+            train_loader,
+            val_loader,
+            config,
+            task,
+            logger,
+            model_type="pytorch_geometric",
+            optimizer_hyperparams=gat_optimizer_hyperparams
+        )
         
         # Predictions
         y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
         y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
-        return {
+        val_labels_for_metrics = y_val_filtered if y_val_filtered is not None else y_val
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
@@ -2464,7 +2669,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             'y_proba_val': y_proba_val,
             'valid_indices_train': train_dataset.valid_indices,  # Return for reference
             'valid_indices_val': val_dataset.valid_indices if val_loader is not None else None
-        }
+        }, training_labels=y_train, validation_labels=val_labels_for_metrics)
     
     # ===== Hybrid Models (Multi-modal) =====
     elif model_type == 'hybrid_gat_fp':
@@ -2514,13 +2719,27 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=hybrid_collate_fn)
             y_val_filtered = y_val[val_dataset.valid_indices]
 
-        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
+        hybrid_optimizer_hyperparams = {
+            'learning_rate': config.gat_hyperparams.get('learning_rate', config.learning_rate),
+            'weight_decay': config.gat_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+        }
+        model = train_pytorch_model(
+            model,
+            train_loader,
+            val_loader,
+            config,
+            task,
+            logger,
+            model_type="pytorch_geometric",
+            optimizer_hyperparams=hybrid_optimizer_hyperparams
+        )
 
         y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
         y_pred_val, y_proba_val = (predict_pytorch_model(model, val_loader, task, threshold=threshold)
                                    if val_loader is not None else (None, None))
 
-        return {
+        val_labels_for_metrics = y_val_filtered if y_val_filtered is not None else y_val
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
@@ -2528,7 +2747,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             'y_proba_val': y_proba_val,
             'valid_indices_train': train_dataset.valid_indices,
             'valid_indices_val': val_dataset.valid_indices if val_dataset is not None else None
-        }
+        }, training_labels=y_train, validation_labels=val_labels_for_metrics)
 
     elif model_type == 'hybrid_gat_bert':
         if not (GAT_AVAILABLE and CHEMBERTA_AVAILABLE):
@@ -2576,13 +2795,27 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=hybrid_collate_fn)
             y_val_filtered = y_val[val_dataset.valid_indices]
 
-        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="pytorch_geometric")
+        hybrid_bert_optimizer_hyperparams = {
+            'learning_rate': config.chemberta_hyperparams.get('learning_rate', config.learning_rate),
+            'weight_decay': config.chemberta_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+        }
+        model = train_pytorch_model(
+            model,
+            train_loader,
+            val_loader,
+            config,
+            task,
+            logger,
+            model_type="pytorch_geometric",
+            optimizer_hyperparams=hybrid_bert_optimizer_hyperparams
+        )
 
         y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
         y_pred_val, y_proba_val = (predict_pytorch_model(model, val_loader, task, threshold=threshold)
                                    if val_loader is not None else (None, None))
 
-        return {
+        val_labels_for_metrics = y_val_filtered if y_val_filtered is not None else y_val
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
@@ -2590,7 +2823,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             'y_proba_val': y_proba_val,
             'valid_indices_train': train_dataset.valid_indices,
             'valid_indices_val': val_dataset.valid_indices if val_dataset is not None else None
-        }
+        }, training_labels=y_train, validation_labels=val_labels_for_metrics)
 
     # ===== Transformer ChemBERTa =====
     elif model_type == 'transformer':
@@ -2619,13 +2852,26 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         
         # Train model with model_type="transformer" for specialized ChemBERTa training strategy
         # This uses: AdamW optimizer (lr=5e-5), CosineAnnealingLR scheduler, full fine-tuning
-        model = train_pytorch_model(model, train_loader, val_loader, config, task, logger, model_type="transformer")
+        bert_optimizer_hyperparams = {
+            'learning_rate': config.chemberta_hyperparams.get('learning_rate', 5e-5),
+            'weight_decay': config.chemberta_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+        }
+        model = train_pytorch_model(
+            model,
+            train_loader,
+            val_loader,
+            config,
+            task,
+            logger,
+            model_type="transformer",
+            optimizer_hyperparams=bert_optimizer_hyperparams
+        )
         
         # Predictions
         y_pred_train, y_proba_train = predict_pytorch_model(model, train_loader, task, threshold=threshold)
         y_pred_val, y_proba_val = predict_pytorch_model(model, val_loader, task, threshold=threshold) if val_loader is not None else (None, None)
         
-        return {
+        return _wrap_result_with_labels({
             'model': model,
             'y_pred_train': y_pred_train,
             'y_proba_train': y_proba_train,
@@ -2633,7 +2879,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             'y_proba_val': y_proba_val,
             'valid_indices_train': valid_indices_train,
             'valid_indices_val': valid_indices_val
-        }
+        }, training_labels=y_train, validation_labels=y_val)
     
     else:
         logger.error(f"Unknown model type: {model_type}")
@@ -3324,7 +3570,7 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
     
     if registry is None:
         input_dim = X_train.shape[1] if X_train is not None else None
-        registry = build_model_registry(task=config.task, input_dim=input_dim)
+        registry = build_model_registry(task=config.task, input_dim=input_dim, config=config)
     
     fold_prefix = f"Fold {fold_idx} - " if fold_idx is not None else ""
     logger.info(f"\n{'='*60}")
@@ -3395,6 +3641,10 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
             X_train_final = None
             X_val_final = None
         
+        if model_config['type'] in ['hybrid_gat_fp', 'hybrid_gat_bert']:
+            X_train_final = X_train_processed
+            X_val_final = X_val_processed
+        
         # Multi-seed training loop
         seed_results = []  # Store results for each seed
         
@@ -3403,21 +3653,38 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
             
             # Set random seed for reproducibility
             set_all_seeds(seed, logger)
+            augmented_smiles_train, augmented_y_train, augmented_fp_features = apply_smiles_augmentation(
+                smiles_train,
+                y_train,
+                config,
+                seed=seed,
+                extra_fp_features=X_train if X_train is not None else None,
+                logger=logger
+            )
             valid_indices_val = None
             valid_indices_train = None
-            
+           
             # Prepare data based on model type
-            if model_config['type'] in ['pytorch_geometric', 'transformer']:
+            if model_config['type'] in ['pytorch_geometric', 'transformer', 'hybrid_gat_fp', 'hybrid_gat_bert']:
                 if smiles_train is None or smiles_val is None:
                     logger.warning(f"{fold_prefix}SMILES data not available, skipping {model_key}")
                     break
-                
+                smiles_for_model = augmented_smiles_train if augmented_smiles_train is not None else smiles_train
+                y_train_for_model = augmented_y_train if augmented_y_train is not None else y_train
+                if model_config['type'] in ['hybrid_gat_fp', 'hybrid_gat_bert']:
+                    X_train_for_model = (augmented_fp_features if augmented_fp_features is not None else
+                                         (X_train_final if X_train_final is not None else X_train))
+                    X_val_for_model = X_val_final if X_val_final is not None else X_val
+                else:
+                    X_train_for_model = None
+                    X_val_for_model = None
+
                 result = train_model_wrapper(
                     model_key, model_config,
-                    None, y_train,  # GAT/ChemBERTa don't use X
-                    None, y_val,
+                    X_train_for_model, y_train_for_model,
+                    X_val_for_model, y_val,
                     config, config.task,
-                    smiles_train, smiles_val,
+                    smiles_for_model, smiles_val,
                     logger,
                     sklearn_random_state=seed,
                 )
@@ -3453,8 +3720,8 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                     logger.warning(f"  {fold_prefix}✗ Failed to save model: {e}")
             
             # Calculate metrics
-            y_val_for_metrics = y_val
-            y_train_for_metrics = y_train
+            labels_train_source = result.get('training_labels', y_train)
+            labels_val_source = result.get('validation_labels', y_val)
 
             # Deep learning datasets may filter out invalid/empty SMILES, so we must
             # align y_true with the length/order of predictions returned by predict_pytorch_model().
@@ -3462,10 +3729,19 @@ def train_single_fold(config: QSARConfig, X_train, y_train, X_val, y_val,
                 valid_indices_val = result.get('valid_indices_val', None)
                 valid_indices_train = result.get('valid_indices_train', None)
 
-            if valid_indices_val is not None:
-                y_val_for_metrics = y_val[valid_indices_val]
-            if valid_indices_train is not None:
-                y_train_for_metrics = y_train[valid_indices_train]
+            if valid_indices_val is not None and labels_val_source is not None:
+                y_val_for_metrics = labels_val_source[valid_indices_val]
+            else:
+                y_val_for_metrics = labels_val_source
+
+            if valid_indices_train is not None and labels_train_source is not None:
+                y_train_for_metrics = labels_train_source[valid_indices_train]
+            else:
+                y_train_for_metrics = labels_train_source
+            if y_train_for_metrics is None:
+                y_train_for_metrics = y_train
+            if y_val_for_metrics is None:
+                y_val_for_metrics = y_val
 
             ids_val_for_metrics = ids_val
             smiles_val_for_metrics = smiles_val
@@ -3651,7 +3927,7 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
     
     # Build model registry
     input_dim = X.shape[1] if X is not None else None
-    registry = build_model_registry(task=config.task, input_dim=input_dim)
+    registry = build_model_registry(task=config.task, input_dim=input_dim, config=config)
     
     logger.info(f"\nAvailable models: {list(registry.keys())}")
     logger.info(f"Selected models: {config.selected_models}")
@@ -5492,12 +5768,12 @@ External Test Set Evaluation:
     # Determine models to train
     if not config.selected_models:
         input_dim = X.shape[1] if X is not None else None
-        registry = build_model_registry(task=config.task, input_dim=input_dim)
+        registry = build_model_registry(task=config.task, input_dim=input_dim, config=config)
         config.selected_models = list(registry.keys())
     else:
         # Validate that selected models are compatible with the current task
         input_dim = X.shape[1] if X is not None else None
-        registry = build_model_registry(task=config.task, input_dim=input_dim)
+        registry = build_model_registry(task=config.task, input_dim=input_dim, config=config)
         available_models = set(registry.keys())
         selected_models_set = set(config.selected_models)
         

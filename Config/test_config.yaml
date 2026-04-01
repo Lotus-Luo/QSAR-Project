@@ -211,8 +211,34 @@ learning_rate: 0.001
 
 # Early stopping patience (number of epochs to wait before stopping)
 # Training stops if validation loss doesn't improve for this many epochs
-# Options: 5 to 20 (recommended: 10)
-early_stopping_patience: 5
+# Options: 20 to 30 (recommended: 25)
+early_stopping_patience: 25
+
+# Weight decay for deep learning optimizers (applied to all gradient-based models)
+# Defaulted to 1e-2 to regularize transformer fine-tuning + GAT/LSTM heads.
+deep_learning_weight_decay: 0.01
+
+# GAT-specific optimizer/architecture overrides
+gat_hyperparams:
+  hidden_dim: 64
+  num_heads: 4  # Attention heads tuned for richer message passing
+  num_layers: 3
+  dropout: 0.3
+  learning_rate: 0.001
+  weight_decay: 0.01
+
+# ChemBERTa-specific overrides (used for transformer-only and hybrid models)
+chemberta_hyperparams:
+  model_name: "DeepChem/ChemBERTa-77M-MLM"
+  dropout: 0.1
+  freeze_transformer_layers: 2  # Freeze the first two of the three layers for head-only fine-tuning
+  learning_rate: 5e-5
+  weight_decay: 0.01
+
+# SMILES augmentation configuration (applied only to training folds)
+smiles_augmentation:
+  enabled: true  # Enumerate only training fold SMILES; val/test stay canonical
+  variants_per_molecule: 2
 
 # ------------------------------------------------------------------------------
 # Class imbalance & prediction thresholds
