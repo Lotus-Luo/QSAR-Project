@@ -22,8 +22,8 @@ Streamlined QSAR pipeline that trains traditional ML, GAT, and ChemBERTa models,
 ## Scripts by stage
 
 ### Stage 1 – Core Modeling
-- `Scripts/step01_train_qsar_models.py`: entry point for single-split or two-stage CV training of LR/RFC/SVC/XGBC/LGBMC/ETC, MLP, GAT, and ChemBERTa models.
-- `Hybrid models (GAT+ChemBERTa)`: The pipeline now supports fused GAT+ChemBERTa heads that share tokenizers/encoders, freeze early transformer layers, and concatenate graph + sequence representations before a residual MLP head.
+- `Scripts/step01_train_qsar_models.py`: entry point for single-split or two-stage CV training of LR/RFC/SVC/XGBC/LGBMC/ETC, MLP, GAT, and ChemBERTa models.  
+ `Hybrid models (GAT+ChemBERTa)`: The pipeline now supports fused GAT+ChemBERTa heads that share tokenizers/encoders, freeze early transformer layers, and concatenate graph + sequence representations before a residual MLP head.
 - `Scripts/step02_run_smoke_test.py`: lightweight regression/classification sanity checks covering NaNs, metrics, and ChemBERTa loader stability.
 - `Scripts/step03_validate_model_robustness.py`: once the best model is identified, run this Y-scrambling / permutation test to show the actual metric (AUC / R²) stands apart from random-label re-fits; it saves histogram/scatter figures and statistics under `models_out/validation/<model>/seed_<seed>`.
 - `--save-train-features`: CLI/YAML toggle for `step01` that writes the Development-set features/labels to `models_out/<run>/data/train_features.npz`, which `step04_applicability_domain.py` consumes to build Williams plots and SOM/Tanimoto boundaries.

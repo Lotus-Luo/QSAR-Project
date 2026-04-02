@@ -12,9 +12,22 @@ python Scripts/step13_shap_interpreter_chemberta.py \
 
 """
 
-import argparse
-import sys
+# %%
 from pathlib import Path
+
+BASE_CONFIG = {
+    "project_root": Path("models_out/classification_20260330_151751"),
+    "model_key": "ChemBERTa",
+    "seed": "42",
+    "export": Path("models_out/classification_20260330_151751/split_seed_30/exports/ChemBERTa/seed_42/pytorch_shap_export.npz"),
+    "output_dir": Path("models_out/classification_20260330_151751/split_seed_30/shap/ChemBERTa/seed_42"),
+    "max_samples": 64,
+    "n_steps": 32,
+    "device": None,
+}
+
+# %%
+import sys
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -50,15 +63,15 @@ def _load_metadata(project_root: Path, model_key: str, seed: str) -> Dict[str, A
         return json.load(fh)
 
 
-def _determine_output_dir(args, export_path: Path) -> Path:
-    if args.output_dir:
-        return args.output_dir
+def _determine_output_dir(cfg: Dict[str, Any], export_path: Path) -> Path:
+    if cfg.get("output_dir"):
+        return cfg["output_dir"]
     split_root = next((p for p in export_path.parents if p.name.startswith("split_seed")), None)
     if split_root is None:
         base_root = export_path.parents[2]
     else:
         base_root = split_root.parent
-    return base_root / "shape" / args.model_key / f"seed_{args.seed}"
+    return base_root / "shape" / cfg["model_key"] / f"seed_{cfg['seed']}"
 
 
 def _forward_fn(model, input_ids, attention_mask):
@@ -109,26 +122,15 @@ def main():
         raise SystemExit("ChemBERTa support is disabled in this environment.")
     _ensure_transformers()
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-p", "--project-root", type=Path, default="models_out", help="QSAR output root")
-    parser.add_argument("-m", "--model-key", required=True, help="Model key (ChemBERTa)")
-    parser.add_argument("-s", "--seed", required=True, help="Seed identifier")
-    parser.add_argument("-e", "--export", type=Path, required=True, help="Stage 1 export (.npz)")
-    parser.add_argument("-o", "--output-dir", type=Path, help="Where to save ChemBERTa SHAP outputs")
-    parser.add_argument("--max-samples", type=int, help="Max number of molecules to attribute (default=all)")
-    parser.add_argument("--n-steps", type=int, default=32, help="Number of steps for Integrated Gradients")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device for attribution")
-    args = parser.parse_args()
-
-    meta = _load_metadata(Path(args.project_root), args.model_key, args.seed)
+    meta = _load_metadata(BASE_CONFIG["project_root"], BASE_CONFIG["model_key"], BASE_CONFIG["seed"])
     if meta.get("model_type") != "transformer":
         raise ValueError("Metadata does not describe a ChemBERTa transformer model.")
 
-    export_path = Path(args.export)
+    export_path = BASE_CONFIG["export"]
     if not export_path.exists():
         raise FileNotFoundError(f"Export file missing: {export_path}")
 
-    output_dir = _determine_output_dir(args, export_path)
+    output_dir = _determine_output_dir(BASE_CONFIG, export_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data = np.load(export_path, allow_pickle=True)
@@ -147,13 +149,14 @@ def main():
     ids_raw = data.get("ids")
     ids_all = list(np.atleast_1d(ids_raw)) if ids_raw is not None else []
 
-    model_dir = Path(args.project_root) / "models" / "full_dev" / args.model_key / f"seed_{args.seed}" / "model"
+    model_dir = BASE_CONFIG["project_root"] / "models" / "full_dev" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}" / "model"
     if not model_dir.exists():
         raise FileNotFoundError(f"Saved ChemBERTa model missing: {model_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
     model = AutoModelForSequenceClassification.from_pretrained(str(model_dir))
-    device = torch.device(args.device)
+    device_str = BASE_CONFIG["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
     model = model.to(device).eval()
 
     contributions, processed_indices = _attribute_tokens(
@@ -161,8 +164,8 @@ def main():
         token_ids_all,
         attention_masks_all,
         device,
-        args.n_steps,
-        args.max_samples,
+        BASE_CONFIG["n_steps"],
+        BASE_CONFIG["max_samples"],
     )
 
     selected_token_ids = _flatten_token_data(token_ids_all, processed_indices)

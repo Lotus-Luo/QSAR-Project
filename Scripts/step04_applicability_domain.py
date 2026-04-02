@@ -11,11 +11,29 @@ Usage:
 
 The script requires numpy-friendly NPZ files that include `features` and `labels`, and optional `ids`/`smiles`.  MiniSom must be installed for the SOM method (`pip install minisom`)."""
 
-import argparse
+# %%
+from pathlib import Path
+
+BASE_CONFIG = {
+    "project_root": Path("models_out/classification_20260330_212716"),
+    "model_key": "RFC",
+    "seed": 42,
+    "train_data": Path("models_out/classification_20260330_212716/split_seed_30/data/train_features.npz"),
+    "external_data": Path("models_out/classification_20260330_212716/split_seed_30/data/splits/external_test.npz"),
+    "predictions": Path("models_out/classification_20260330_212716/split_seed_30/predictions/external_test_predictions.csv"),
+    "som_rows": 8,
+    "som_cols": 8,
+    "som_iterations": 1000,
+    "tanimoto_threshold": 0.5,
+    "binary_threshold": 0.5,
+    "output_dir": Path("models_out/classification_20260330_212716/validation/RFC/seed_42"),
+    "skip_som": False,
+}
+
+# %%
 import json
 import shutil
 import sys
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import matplotlib
@@ -161,25 +179,9 @@ def _backup_predictions(path: Path) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-p", "--project-root", type=Path, default=Path("models_out"))
-    parser.add_argument("-m", "--model-key", required=True)
-    parser.add_argument("-s", "--seed", required=True, type=int)
-    parser.add_argument("--train-data", type=Path, help="NPZ with training features (defaults to <project>/data/train_features.npz)")
-    parser.add_argument("--external-data", type=Path, help="NPZ with external features (defaults to <project>/data/splits/external_test.npz)")
-    parser.add_argument("--predictions", type=Path, help="CSV predictions file to annotate (defaults to <project>/predictions/external_test_predictions.csv)")
-    parser.add_argument("--som-rows", type=int, default=8)
-    parser.add_argument("--som-cols", type=int, default=8)
-    parser.add_argument("--som-iterations", type=int, default=1000)
-    parser.add_argument("--tanimoto-threshold", type=float, default=0.5)
-    parser.add_argument("--binary-threshold", type=float, default=0.5)
-    parser.add_argument("--output-dir", type=Path, help="Where to save figures/statistics (default: <project>/validation/<model>/seed_<seed>)")
-    parser.add_argument("--skip-som", action="store_true", help="Skip the SOM-based analysis (MiniSom not required)")
-    args = parser.parse_args()
-
-    train_path = args.train_data or args.project_root / "data" / "train_features.npz"
-    external_path = args.external_data or args.project_root / "data" / "splits" / "external_test.npz"
-    predictions_path = args.predictions or args.project_root / "predictions" / "external_test_predictions.csv"
+    train_path = BASE_CONFIG["train_data"] or BASE_CONFIG["project_root"] / "data" / "train_features.npz"
+    external_path = BASE_CONFIG["external_data"] or BASE_CONFIG["project_root"] / "data" / "splits" / "external_test.npz"
+    predictions_path = BASE_CONFIG["predictions"] or BASE_CONFIG["project_root"] / "predictions" / "external_test_predictions.csv"
 
     train_data = _load_npz(train_path)
     external_data = _load_npz(external_path)
@@ -187,9 +189,9 @@ def main():
     X_external = external_data["features"]
 
     preds = pd.read_csv(predictions_path)
-    mask = preds["model"].astype(str).str.upper() == args.model_key.upper()
+    mask = preds["model"].astype(str).str.upper() == BASE_CONFIG["model_key"].upper()
     if not mask.any():
-        raise ValueError(f"No predictions found for model {args.model_key} in {predictions_path}")
+        raise ValueError(f"No predictions found for model {BASE_CONFIG['model_key']} in {predictions_path}")
     ad_preds = preds.loc[mask].copy()
     if len(ad_preds) != len(X_external):
         raise ValueError("Number of external samples does not match predictions subset; check data alignment")
@@ -208,14 +210,14 @@ def main():
     leverage_flag = leverage <= h_star
 
     som_flag = np.ones(len(X_external), dtype=bool)
-    if not args.skip_som:
-        som, occupied = _train_som(X_train, args.som_rows, args.som_cols, args.som_iterations)
+    if not config.skip_som:
+        som, occupied = _train_som(X_train, BASE_CONFIG["som_rows"], BASE_CONFIG["som_cols"], BASE_CONFIG["som_iterations"])
         som_flag = _compute_som_flags(som, occupied, X_external)
     similarity_scores, similarity_flag = _compute_tanimoto_flags(
         X_train,
         X_external,
-        args.binary_threshold,
-        args.tanimoto_threshold,
+        BASE_CONFIG["binary_threshold"],
+        BASE_CONFIG["tanimoto_threshold"],
     )
 
     in_domain = leverage_flag & som_flag & similarity_flag
@@ -233,17 +235,17 @@ def main():
     _backup_predictions(predictions_path)
     preds.to_csv(predictions_path, index=False)
 
-    output_dir = args.output_dir or args.project_root / "validation" / args.model_key / f"seed_{args.seed}"
+    output_dir = BASE_CONFIG["output_dir"] or BASE_CONFIG["project_root"] / "validation" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
-        "model_key": args.model_key,
-        "seed": args.seed,
+        "model_key": BASE_CONFIG["model_key"],
+        "seed": BASE_CONFIG["seed"],
         "h_star": h_star,
         "n_training_samples": len(X_train),
         "n_external_samples": len(X_external),
         "in_domain_fraction": float(np.mean(in_domain)),
-        "tanimoto_threshold": args.tanimoto_threshold,
+        "tanimoto_threshold": BASE_CONFIG["tanimoto_threshold"],
     }
     (output_dir / "ad_summary.json").write_text(json.dumps(summary, indent=2))
 

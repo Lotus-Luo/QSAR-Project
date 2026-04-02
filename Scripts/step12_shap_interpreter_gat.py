@@ -9,15 +9,24 @@ python Scripts/step12_shap_interpreter_gat.py \
   -o models_out/classification_20260330_151751/split_seed_30/shap/GAT/seed_42/
 """
 
-import argparse
-import json
+# %%
 from pathlib import Path
+
+CONFIG = {
+    "project_root": Path("models_out/classification_20260330_151751"),
+    "model_key": "GAT",
+    "seed": "42",
+    "export_path": Path("models_out/classification_20260330_151751/split_seed_30/exports/GAT/seed_42/pytorch_shap_export.npz"),
+    "output_dir": Path("models_out/classification_20260330_151751/split_seed_30/shap/GAT/seed_42"),
+}
+
+# %%
+import json
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 from captum.attr import IntegratedGradients
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,14 +36,16 @@ if str(REPO_ROOT) not in sys.path:
 
 from Scripts.step01_train_qsar_models import GATModel, GAT_NUM_EDGE_FEATURES, GAT_NUM_NODE_FEATURES
 
-DEFAULT_CONFIG_PATH = REPO_ROOT / "Shap_config" / "shap_gat_runner_config.yaml"
+DEFAULT_GAT_CONFIG = {
+    "aggregation_method": "sum",
+    "clipping_threshold": 0.995,
+    "output_format": "csv_plus_npz",
+    "device": "cuda" if torch.cuda.is_available() else "cpu",
+}
 
 
 def _load_config(path: Optional[Path]) -> Dict[str, Any]:
-    config_path = path or DEFAULT_CONFIG_PATH
-    with open(config_path, 'r') as fh:
-        data = yaml.safe_load(fh) or {}
-    return data.get('gat_interpretation', {})
+    return DEFAULT_GAT_CONFIG.copy()
 
 
 def _load_metadata(project_root: Path, model_key: str, seed: str) -> Dict[str, Any]:
@@ -83,45 +94,36 @@ def _normalize_values(values: Iterable[np.ndarray], clip_threshold: float) -> Li
     return normalized
 
 
-def _determine_output_dir(args, export_path: Path) -> Path:
-    if args.output_dir:
-        return args.output_dir
+def _determine_output_dir(cfg: Dict[str, Any], export_path: Path) -> Path:
+    if cfg.get("output_dir"):
+        return cfg["output_dir"]
     split_root = next((p for p in export_path.parents if p.name.startswith('split_seed')), None)
     if split_root is None:
         base_root = export_path.parents[2]
     else:
         base_root = split_root.parent
-    return base_root / 'shape' / args.model_key / f"seed_{args.seed}"
+    return base_root / 'shape' / cfg["model_key"] / f"seed_{cfg['seed']}"
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-p', '--project-root', type=Path, default='models_out', help='QSAR output root')
-    parser.add_argument('-m', '--model-key', required=True, help='Model key (GAT)')
-    parser.add_argument('-s', '--seed', required=True, help='Seed identifier')
-    parser.add_argument('-e', '--export', type=Path, required=True, help='Exported .npz (GAT graphs)')
-    parser.add_argument('-c', '--config', type=Path, help='shap runner config path')
-    parser.add_argument('-o', '--output-dir', type=Path, help='Where to save shape outputs (defaults to shape/<model>/seed)')
-    args = parser.parse_args()
-
-    cfg = _load_config(args.config)
+    cfg = _load_config(None)
     agg_method = cfg.get('aggregation_method', 'sum')
     clip_threshold = cfg.get('clipping_threshold', 0.995)
     output_format = cfg.get('output_format', 'csv_plus_npz')
     device = torch.device(cfg.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
 
-    export_data = np.load(args.export, allow_pickle=True)
+    export_data = np.load(CONFIG["export_path"], allow_pickle=True)
     node_features = [np.asarray(v) for v in export_data['node_features']]
     edge_indices = [np.asarray(v) for v in export_data['edge_indices']]
     edge_attrs = [np.asarray(v) for v in export_data['edge_attrs']]
     valid_indices = export_data.get('valid_indices')
 
-    metadata = _load_metadata(args.project_root, args.model_key, args.seed)
+    metadata = _load_metadata(CONFIG["project_root"], CONFIG["model_key"], CONFIG["seed"])
     if metadata.get('model_type') != 'pytorch_geometric':
         raise ValueError('Metadata does not correspond to a GAT model')
 
     model = _instantiate_gat(metadata)
-    model_path = args.project_root / 'models' / 'full_dev' / args.model_key / f"seed_{args.seed}" / 'model.pt'
+    model_path = CONFIG["project_root"] / 'models' / 'full_dev' / CONFIG["model_key"] / f"seed_{CONFIG['seed']}" / 'model.pt'
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint missing: {model_path}")
     state = torch.load(model_path, map_location=device)
@@ -129,8 +131,6 @@ def main():
     model = model.to(device).eval()
 
     scores_list: List[np.ndarray] = []
-    info_rows: List[Dict[str, Any]] = []
-    scores_list = []
     info_rows: List[Dict[str, Any]] = []
 
     for graph_idx, (node_feat_np, edge_index_np, edge_attr_np) in enumerate(zip(node_features, edge_indices, edge_attrs)):
@@ -159,7 +159,7 @@ def main():
             df.loc[offset:offset+n-1, 'score_norm'] = norm_scores
             offset += n
 
-    output_dir = _determine_output_dir(args, args.export)
+    output_dir = _determine_output_dir(CONFIG, CONFIG["export_path"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = output_dir / 'gat_atom_contributions.csv'

@@ -13,10 +13,18 @@ python Scripts/step15_summarize_global_features.py \
 
 """
 
-import argparse
-from collections import OrderedDict
+# %%
 from pathlib import Path
 from typing import Iterable, Optional
+
+BASE_CONFIG = {
+    "contributions": Path("models_out/classification_20260330_151751/split_seed_30/shap/GAT/seed_42/gat_atom_contributions.csv"),
+    "shap_export": Path("models_out/classification_20260330_151751/split_seed_30/exports/GAT/seed_42/pytorch_shap_export.npz"),
+    "output_dir": Path("models_out/classification_20260330_151751/split_seed_30/shap/GAT/seed_42/global_summary"),
+}
+
+# %%
+from collections import OrderedDict
 
 import matplotlib
 matplotlib.use("Agg")
@@ -214,18 +222,12 @@ def _draw_bar_chart(output_dir: Path, aggregated: dict[str, float]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--contributions", type=Path, required=True, help="GAT atom contributions CSV")
-    parser.add_argument("--shap-export", type=Path, required=True, help="Pytorch shap export (.npz) with SMILES and valid_indices")
-    parser.add_argument("--output-dir", type=Path, help="Where to save the summary chart")
-    args = parser.parse_args()
-
-    output_dir = args.output_dir or args.contributions.parent / "gat_global_shap_summary"
+    output_dir = BASE_CONFIG["output_dir"] or BASE_CONFIG["contributions"].parent / "gat_global_shap_summary"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = _load_gat_dataframe(args.contributions)
+    df = _load_gat_dataframe(BASE_CONFIG["contributions"])
     weight_map = _build_weight_map(df)
-    data = np.load(args.shap_export, allow_pickle=True)
+    data = np.load(BASE_CONFIG["shap_export"], allow_pickle=True)
     smiles_list = _ensure_smiles(data.get("smiles"))
     valid_indices_raw = data.get("valid_indices")
     valid_indices = (

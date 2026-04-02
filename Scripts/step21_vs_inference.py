@@ -17,13 +17,27 @@ python Scripts/step21_vs_inference.py \
         
 """
 
-import argparse
-import json
-import logging
-import sys
+# %%
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+RUN_CONFIG = {
+    "run_dir": Path("models_out/classification_20260326_213228/split_seed_3"),
+    "input_path": Path("Data/prediction_test_data_fingerprints.csv"),
+    "output_path": Path("virtual_screening/VS_prediction_test_data_fingerprints_classification.csv"),
+    "models": "GAT,ChemBERTa,RFC,SVC",
+    "batch_size": 64,
+    "id_column": "id",
+    "smiles_column": "smiles",
+    "force_fingerprints": False,
+    "log_level": "INFO",
+}
+
+# %%
+import json
+import logging
+import sys
 
 import joblib
 import numpy as np
@@ -86,26 +100,6 @@ class HuggingFaceChemBERTa(nn.Module):
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         return outputs.logits.squeeze(-1)
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Predict using saved QSAR models")
-    parser.add_argument("--run-dir", required=True, type=Path,
-                        help="Path to a split_seed_* directory (models_out/.../split_seed_3)")
-    parser.add_argument("--input", "-i", required=True, type=Path,
-                        help="CSV/Parquet file with id, smiles, and optional fingerprint columns")
-    parser.add_argument("--output", "-o", type=Path,
-                        help="Prediction CSV path (default: virtual_screening/<run>_<timestamp>.csv)")
-    parser.add_argument("--models", help="Comma-separated subset of model names to predict with")
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Batch size for DataLoader used by MLP/GAT/ChemBERTa")
-    parser.add_argument("--id-column", default=None, help="Override ID column name")
-    parser.add_argument("--smiles-column", default=None, help="Override SMILES column name")
-    parser.add_argument("--force-fingerprints", action="store_true",
-                        help="Regenerate fingerprint columns even if they already exist")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Logging verbosity")
-    return parser.parse_args()
 
 
 def setup_logger(level: str) -> logging.Logger:
@@ -378,15 +372,14 @@ def predict_chemberta(
 
 
 def main():
-    args = parse_args()
-    logger = setup_logger(args.log_level)
-    run_dir = args.run_dir.resolve()
+    logger = setup_logger(RUN_CONFIG["log_level"])
+    run_dir = RUN_CONFIG["run_dir"].resolve()
     if not run_dir.exists():
         raise SystemExit(f"Run directory not found: {run_dir}")
     config = load_config(run_dir)
     task = config.get("task", "classification")
-    id_col = args.id_column or config.get("id_column", "id")
-    smiles_col = args.smiles_column or config.get("smiles_column", "smiles")
+    id_col = RUN_CONFIG["id_column"] or config.get("id_column", "id")
+    smiles_col = RUN_CONFIG["smiles_column"] or config.get("smiles_column", "smiles")
     config["smiles_column"] = smiles_col
     results_df = load_results(run_dir)
     if results_df is None:
@@ -397,8 +390,8 @@ def main():
     if not full_dev_dir.exists():
         raise SystemExit(f"Expected checkpoints in {full_dev_dir}")
     available_models = sorted([d.name for d in full_dev_dir.iterdir() if d.is_dir()])
-    selected_models = filter_models(available_models, args.models.split(",") if args.models else None, logger)
-    df = read_table(args.input)
+    selected_models = filter_models(available_models, RUN_CONFIG["models"].split(",") if RUN_CONFIG["models"] else None, logger)
+    df = read_table(RUN_CONFIG["input_path"])
     if id_col not in df.columns or smiles_col not in df.columns:
         raise SystemExit(f"Input file must contain '{id_col}' and '{smiles_col}' columns")
     ids = df[id_col].tolist()
@@ -420,7 +413,7 @@ def main():
         if metadata.get("model_type") in {"sklearn", "pytorch"}:
             fingerprint_requirements.extend(metadata.get("feature_names", []))
     if fingerprint_requirements:
-        df = ensure_fingerprints(df, sorted(set(fingerprint_requirements)), config, logger, args.force_fingerprints)
+        df = ensure_fingerprints(df, sorted(set(fingerprint_requirements)), config, logger, RUN_CONFIG["force_fingerprints"])
 
     result_df = df[[id_col, smiles_col]].copy()
     used_models: List[str] = []
@@ -448,12 +441,12 @@ def main():
                 scaler = load_scaler(seed_dir)
                 frame = predict_mlp(
                     seed_dir, model_name, matrix, scaler, ids, smiles_list, seed, task,
-                    logger, args.batch_size, model_config, metadata
+                    logger, RUN_CONFIG["batch_size"], model_config, metadata
                 )
             elif model_type == "pytorch_geometric":
-                frame = predict_gat(seed_dir, model_name, smiles_list, ids, seed, task, logger, args.batch_size, model_config)
+                frame = predict_gat(seed_dir, model_name, smiles_list, ids, seed, task, logger, RUN_CONFIG["batch_size"], model_config)
             elif model_type == "transformer":
-                frame = predict_chemberta(seed_dir, model_name, smiles_list, ids, seed, task, logger, args.batch_size)
+                frame = predict_chemberta(seed_dir, model_name, smiles_list, ids, seed, task, logger, RUN_CONFIG["batch_size"])
             else:
                 logger.warning(f"Skipping unsupported model type: {model_type}")
                 continue
@@ -477,9 +470,9 @@ def main():
 
     default_root = Path("virtual_screening")
     parent_name = run_dir.parent.name or run_dir.name
-    input_stem = Path(args.input).stem  # 获取输入文件的文件名（不带后缀）
+    input_stem = Path(RUN_CONFIG["input_path"]).stem  # 获取输入文件的文件名（不带后缀）
     default_path = default_root / f"VS_{input_stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    output_path = args.output or default_path
+    output_path = RUN_CONFIG["output_path"] or default_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result_df.to_csv(output_path, index=False)
     logger.info(f"Saved predictions for {len(used_models)} models to {output_path}")

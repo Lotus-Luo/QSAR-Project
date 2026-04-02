@@ -31,9 +31,27 @@ python Scripts/step32_plot_pharmacophore_maps.py \
 --o ./model_out/classificationXXX/split_seed_x/shap/<model>/seed_y (defualt)
 """
 
-import argparse
+# %%
 from pathlib import Path
 from typing import Iterable, Optional
+
+RUN_CONFIG = {
+    "input_path": Path("models_out/classification_20260330_151751/split_seed_30/exports/MLP/seed_42/pytorch_shap_export.npz"),
+    "model_key": "MLP",
+    "seed": "42",
+    "output_dir": None,
+    "shape_root": None,
+    "max_display": 25,
+    "heatmap_samples": 50,
+    "chemberta_token_contributions": None,
+    "chemberta_max_samples": 16,
+    "gat_contributions": None,
+    "gat_max_molecules": 16,
+    "gat_image_size": 360,
+}
+
+# %%
+import matplotlib
 
 import matplotlib
 matplotlib.use("Agg")
@@ -410,47 +428,32 @@ def main():
     if shap is None:
         raise SystemExit("Shap is required for visualization. Install with `pip install shap`")
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-i", "--input", type=Path, required=True, help="Exported .npz with shap_values")
-    parser.add_argument("-m", "--model-key", required=True, help="Model key used during training (e.g., MLP)")
-    parser.add_argument("-s", "--seed", required=True, help="Seed identifier stored under seed_<seed>")
-    parser.add_argument("-o", "--output-dir", type=Path, help="Directory for plots (default: <run_root>/shape/<model>/seed)")
-    parser.add_argument("--shape-root", type=Path, help="Optional base run directory for shape outputs")
-    parser.add_argument("--max-display", type=int, default=25, help="Max features to display")
-    parser.add_argument("--heatmap-samples", type=int, default=64, help="Samples for the heatmap")
-    parser.add_argument("--chemberta-token-contributions", type=Path, help="ChemBERTa token contributions .npz for text heatmap")
-    parser.add_argument("--chemberta-max-samples", type=int, default=16, help="Max sequences to render in ChemBERTa heatmap")
-    parser.add_argument("--gat-contributions", type=Path, help="CSV or NPZ with per-atom GAT contributions")
-    parser.add_argument("--gat-max-molecules", type=int, default=16, help="Max number of GAT molecules to visualize")
-    parser.add_argument("--gat-image-size", type=int, default=360, help="Square pixel size for each GAT similarity map")
-    args = parser.parse_args()
-
-    data = np.load(args.input, allow_pickle=True)
-    input_path = Path(args.input)
-    if args.output_dir:
-        shape_root = Path(args.output_dir)
+    data = np.load(RUN_CONFIG["input_path"], allow_pickle=True)
+    input_path = RUN_CONFIG["input_path"]
+    if RUN_CONFIG["output_dir"]:
+        shape_root = RUN_CONFIG["output_dir"]
     else:
-        if args.shape_root:
-            base_root = Path(args.shape_root)
+        if RUN_CONFIG["shape_root"]:
+            base_root = RUN_CONFIG["shape_root"]
         else:
             split_root = next((p for p in input_path.parents if p.name.startswith("split_seed")), None)
             base_root = split_root.parent if split_root is not None else input_path.parents[2]
-        shape_root = base_root / "shape" / args.model_key / f"seed_{args.seed}"
+        shape_root = base_root / "shape" / RUN_CONFIG["model_key"] / f"seed_{RUN_CONFIG['seed']}"
     shape_root.mkdir(parents=True, exist_ok=True)
     output_dir = shape_root
 
-    if args.chemberta_token_contributions:
-        chem_data = _load_chemberta_token_data(args.chemberta_token_contributions)
-        _render_chemberta_token_heatmap(chem_data, output_dir, args.chemberta_max_samples)
+    if RUN_CONFIG["chemberta_token_contributions"]:
+        chem_data = _load_chemberta_token_data(RUN_CONFIG["chemberta_token_contributions"])
+        _render_chemberta_token_heatmap(chem_data, output_dir, RUN_CONFIG["chemberta_max_samples"])
         return
 
-    if args.gat_contributions:
+    if RUN_CONFIG["gat_contributions"]:
         saved = _visualize_gat_contributions(
             data,
-            args.gat_contributions,
+            RUN_CONFIG["gat_contributions"],
             output_dir,
-            args.gat_max_molecules,
-            args.gat_image_size,
+            RUN_CONFIG["gat_max_molecules"],
+            RUN_CONFIG["gat_image_size"],
         )
         if saved:
             print(f"GAT similarity maps saved to: {output_dir}")
@@ -466,7 +469,7 @@ def main():
         raise ValueError("Exported feature matrix is empty. Nothing to plot.")
 
     X_df = pd.DataFrame(features, columns=feature_names)
-    sample_size = min(args.max_display * 2, len(X_df))
+    sample_size = min(RUN_CONFIG["max_display"] * 2, len(X_df))
     if sample_size < len(X_df):
         rng = np.random.default_rng(42)
         sample_idx = rng.choice(len(X_df), sample_size, replace=False)
@@ -483,7 +486,7 @@ def main():
         shap_sample,
         X_sample,
         feature_names=feature_names,
-        max_display=args.max_display,
+        max_display=RUN_CONFIG["max_display"],
         show=False,
         cmap="RdBu_r",
     )
@@ -495,7 +498,7 @@ def main():
     _save_fig(summary_fig, output_dir / "exported_summary")
 
     # Heatmap
-    heatmap_samples = min(args.heatmap_samples, len(X_sample))
+    heatmap_samples = min(RUN_CONFIG["heatmap_samples"], len(X_sample))
     base_vals = _prepare_base_values(data.get("base_values"), shap_sample.shape[-1])
     explanation = shap.Explanation(
         values=shap_sample[:heatmap_samples],
@@ -506,11 +509,11 @@ def main():
     n_instances = explanation.values.shape[0]
     n_features = explanation.values.shape[1]
     instance_order = np.arange(n_instances)
-    feature_display = min(n_features, args.max_display)
+    feature_display = min(n_features, RUN_CONFIG["max_display"])
     feature_order = np.arange(feature_display)
     shap.plots.heatmap(
         explanation,
-        max_display=args.max_display,
+        max_display=RUN_CONFIG["max_display"],
         show=False,
         cmap="RdBu_r",
         instance_order=instance_order,

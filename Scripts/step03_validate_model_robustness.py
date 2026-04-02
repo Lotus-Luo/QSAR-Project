@@ -13,11 +13,27 @@ Usage:
 By default the script uses the metadata saved alongside the model to apply the same feature mask.
 It currently supports sklearn models and the PyTorch MLP (ResidualMLP)."""
 
-import argparse
+# %%
+from pathlib import Path
+
+BASE_CONFIG = {
+    "project_root": Path("models_out/classification_20260402_154629"),  # run directory tag
+    "split_seed": 4,
+    "model_key": "Hybrid_GAT_FP",  # choices: Hybrid_GAT_FP | Hybrid_GAT_BERT | GAT
+    "seed": 42,
+    "data_path": Path("models_out/classification_20260402_154629/split_seed_4/data/splits/external_test.npz"),
+    "task": "classification",  # choices: classification | regression
+    "n_permutations": 1,
+    "epochs": 20,
+    "batch_size": 32,
+    "lr": 1e-3,
+    "output_root": Path("models_out/classification_20260402_154629/validation"),  # summary output root: validation/<model>/<seed>
+    "seed_value": 42,
+}
+
 import json
 import math
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import matplotlib
@@ -200,31 +216,17 @@ def _plot_scatter(correlations: List[float], metrics: List[float], path: Path, x
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-p", "--project-root", type=Path, default=Path("models_out"))
-    parser.add_argument("-m", "--model-key", required=True)
-    parser.add_argument("-s", "--seed", required=True, type=int)
-    parser.add_argument("--data", type=Path, help="NPZ with features/labels (default: <project>/data/splits/external_test.npz)")
-    parser.add_argument("--task", choices=["classification", "regression"], help="Task override")
-    parser.add_argument("--n-permutations", type=int, default=100, help="Number of Y-scrambling runs")
-    parser.add_argument("--epochs", type=int, default=20, help="Epochs per PyTorch scramble")
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--output-dir", type=Path, help="Where to save validation plots (default: <project>/validation/<model>/seed_<seed>)")
-    parser.add_argument("--seed-value", type=int, default=42, help="Random seed for permutations")
-    args = parser.parse_args()
-
-    seed_dir = args.project_root / "models" / "full_dev" / args.model_key / f"seed_{args.seed}"
+    split_dir = BASE_CONFIG["project_root"] / f"split_seed_{BASE_CONFIG['split_seed']}"
+    seed_dir = split_dir / "models" / "full_dev" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     if not seed_dir.exists():
         raise FileNotFoundError(f"Model directory missing: {seed_dir}")
-
     metadata = _load_metadata(seed_dir)
-    task = args.task or metadata.get("task", "classification")
-    data_path = args.data or args.project_root / "data" / "splits" / "external_test.npz"
+    task = BASE_CONFIG["task"] or metadata.get("task", "classification")
+    data_path = BASE_CONFIG["data_path"] or BASE_CONFIG["project_root"] / "data" / "splits" / "external_test.npz"
     data = _load_npz(data_path)
     X = data["features"]
     y = data["labels"]
-    mask_path = args.project_root / "feature_processors" / "feature_mask.npy"
+    mask_path = BASE_CONFIG["project_root"] / "feature_processors" / "feature_mask.npy"
     X = _apply_feature_mask(X, mask_path)
 
     model_path = _find_model_file(seed_dir)
@@ -237,8 +239,8 @@ def main():
         y_pred, y_proba = _evaluate_sklearn(model, X, task)
     elif model_type == "pytorch":
         config_path = seed_dir / "model_config.json"
-        config = json.loads(config_path.read_text()) if config_path.exists() else {}
-        params = config if "params" in config else {}
+        model_cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
+        params = model_cfg if "params" in model_cfg else {}
         mlp = _instantiate_mlp(params, X.shape[1])
         mlp.load_state_dict(torch.load(model_path, map_location="cpu"))
         y_pred, y_proba = _evaluate_pytorch(mlp, X, task, torch.device("cpu"))
@@ -247,12 +249,12 @@ def main():
         raise NotImplementedError(f"Model type '{model_type}' is not supported for permutation testing")
 
     actual_metric = _metric_from_probs(y, y_proba, task)
-    rng = np.random.default_rng(args.seed_value)
+    rng = np.random.default_rng(BASE_CONFIG["seed_value"])
 
     rand_metrics: List[float] = []
     correlations: List[float] = []
 
-    for idx in range(args.n_permutations):
+    for idx in range(BASE_CONFIG["n_permutations"]):
         y_rand = rng.permutation(y)
         correlations.append(_safe_corr(y, y_rand))
 
@@ -267,9 +269,9 @@ def main():
                 y_rand.astype(float),
                 task,
                 torch.device("cpu"),
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                lr=args.lr,
+                epochs=BASE_CONFIG["epochs"],
+                batch_size=BASE_CONFIG["batch_size"],
+                lr=BASE_CONFIG["lr"],
             )
             _, perm_proba = _evaluate_pytorch(perm_model, X, task, torch.device("cpu"))
 
@@ -290,13 +292,13 @@ def main():
         if delta > 0:
             crp2 = actual_metric * math.sqrt(delta)
 
-    base_output = args.output_dir or args.project_root / "validation" / args.model_key / f"seed_{args.seed}"
+    base_output = BASE_CONFIG["output_root"] / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     output_dir = base_output
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
-        "model_key": args.model_key,
-        "seed": args.seed,
+        "model_key": selected_model_key,
+        "seed": BASE_CONFIG["seed"],
         "task": task,
         "actual_metric": actual_metric,
         "mean_random": mu_rand,
@@ -305,7 +307,7 @@ def main():
         "p_value": p_value,
         "crp2": crp2 if not math.isnan(crp2) else None,
         "metric_name": "AUC" if task == "classification" else "R2",
-        "n_permutations": args.n_permutations,
+        "n_permutations": BASE_CONFIG["n_permutations"],
     }
     (output_dir / "permutation_summary.json").write_text(json.dumps(summary, indent=2))
 

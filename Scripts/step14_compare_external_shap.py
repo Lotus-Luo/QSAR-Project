@@ -16,10 +16,24 @@ Usage:
     --sample-size, --max-display, --heatmap-samples control SHAP sampling/plot sizes
 """
 
-import argparse
-import json
+# %%
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+BASE_CONFIG = {
+    "project_root": Path("models_out/classification_20260330_151751"),
+    "model_key": "RFC",
+    "seed": 42,
+    "task": "classification",  # choices: classification | regression
+    "external_data": Path("models_out/classification_20260330_151751/split_seed_30/data/splits/external_test.npz"),
+    "output_dir": Path("models_out/classification_20260330_151751/shap/RFC/seed_42"),
+    "sample_size": 500,
+    "max_display": 20,
+    "heatmap_samples": 64,
+}
+
+# %%
+import json
 
 import joblib
 import matplotlib
@@ -168,29 +182,17 @@ def _normalize_shap_values(shap_values, task: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-p", "--project-root", default="models_out", help="Output directory produced by the main QSAR pipeline")
-    parser.add_argument("-m", "--model-key", required=True, help="Model key (e.g., XGBC, RFC, MLP)")
-    parser.add_argument("-s", "--seed", required=True, type=int, help="Seed identifier used when training the full Development model")
-    parser.add_argument("-t", "--task", choices=['classification', 'regression'], help="Task type (defaults to the one stored in metadata)")
-    parser.add_argument("--external-data", type=Path, help="Path to the saved external test split (.npz). Defaults to <project_root>/data/splits/external_test.npz")
-    parser.add_argument("-o", "--output-dir", type=Path, help="Where to save SHAP outputs (defaults to <project_root>/shap/<model>/<seed>)")
-    parser.add_argument("--sample-size", type=int, default=500, help="Maximum number of samples to include in SHAP computations")
-    parser.add_argument("--max-display", type=int, default=20, help="Max features to show on summary/heatmap plots")
-    parser.add_argument("--heatmap-samples", type=int, default=64, help="Number of samples to visualize in the heatmap")
-    args = parser.parse_args()
-
-    project_root = Path(args.project_root)
-    seed_dir = project_root / "models" / "full_dev" / args.model_key / f"seed_{args.seed}"
+    project_root = BASE_CONFIG["project_root"]
+    seed_dir = project_root / "models" / "full_dev" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     if not seed_dir.exists():
         raise FileNotFoundError(f"Seed directory not found: {seed_dir}")
 
-    external_data_path = args.external_data or project_root / "data" / "splits" / "external_test.npz"
+    external_data_path = BASE_CONFIG["external_data"] or project_root / "data" / "splits" / "external_test.npz"
     external_data_path = Path(external_data_path)
     if not external_data_path.exists():
         raise FileNotFoundError(f"External test data not found: {external_data_path}")
 
-    output_dir = args.output_dir or project_root / "shap" / args.model_key / f"seed_{args.seed}"
+    output_dir = BASE_CONFIG["output_dir"] or project_root / "shap" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_path = seed_dir / "metadata.json"
@@ -217,10 +219,10 @@ def main():
     if feature_names is None or len(feature_names) != X_for_model.shape[1]:
         feature_names = [f"f_{i}" for i in range(X_for_model.shape[1])]
 
-    task = args.task or metadata.get('task', 'classification')
+    task = BASE_CONFIG["task"] or metadata.get('task', 'classification')
     X_df = pd.DataFrame(X_for_model, columns=feature_names)
 
-    sample_size = min(args.sample_size, len(X_df))
+    sample_size = min(BASE_CONFIG["sample_size"], len(X_df))
     if sample_size < len(X_df):
         rng = np.random.default_rng(42)
         sample_idx = rng.choice(len(X_df), sample_size, replace=False)
@@ -263,8 +265,8 @@ def main():
 
     height = max(8, len(feature_names) * 0.28)
     plt.figure(figsize=(12, height))
-    shap.summary_plot(shap_array, X_sample, feature_names=feature_names, max_display=args.max_display, show=False)
-    plt.title(f"SHAP Summary ({args.model_key} seed={args.seed})", fontsize=14, fontweight='bold')
+    shap.summary_plot(shap_array, X_sample, feature_names=feature_names, max_display=BASE_CONFIG["max_display"], show=False)
+    plt.title(f"SHAP Summary ({BASE_CONFIG['model_key']} seed={BASE_CONFIG['seed']})", fontsize=14, fontweight='bold')
     ax = plt.gca()
     ax.xaxis.set_major_locator(MultipleLocator(5))
     ax.tick_params(axis='x', direction='out')
@@ -272,7 +274,7 @@ def main():
     summary_fig.subplots_adjust(left=0.32, right=0.98, top=0.92, bottom=0.12)
     _save_fig(summary_fig, output_dir / "shap_summary")
 
-    heatmap_samples = min(args.heatmap_samples, len(X_sample))
+    heatmap_samples = min(BASE_CONFIG["heatmap_samples"], len(X_sample))
     heatmap_vals = shap_proc
     if heatmap_vals.ndim > 2:
         reduce_axes = tuple(range(1, heatmap_vals.ndim - 1))
@@ -284,7 +286,7 @@ def main():
         data=X_sample.iloc[:heatmap_samples],
         feature_names=feature_names
     )
-    shap.plots.heatmap(explanation, max_display=args.max_display, show=False)
+    shap.plots.heatmap(explanation, max_display=BASE_CONFIG["max_display"], show=False)
     ax = plt.gca()
     ax.xaxis.set_major_locator(MultipleLocator(5)) # 每 5 个实例显示一个刻度
     ax.tick_params(axis='x', direction='out', labelsize=12, pad=5) # 

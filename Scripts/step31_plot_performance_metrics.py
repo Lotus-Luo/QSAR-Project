@@ -8,7 +8,6 @@ Usage:
   --include-cv \
   --boxplot-stage both
 
-
 Features:
   * Nature/Science–style ROC/PR panels (white background, Times New Roman, 1.5pt lines, alpha=0.1 shading).
   * Multi-metric boxplots (MCC, F1, ACC, AUC, PR-AUC, EF%) with swarm overlays showing every split_seed datapoint.
@@ -16,9 +15,23 @@ Features:
   * SVG outputs saved at 300+ DPI for perfect vector quality.
 """
 
-import argparse
+# %%
 from pathlib import Path
 from typing import Dict, List, Optional
+
+CONFIG = {
+    "base_dir": Path("models_out/classification_20260330_151751"),
+    "output_dir": None,
+    "include_external": True,
+    "include_cv": True,
+    "boxplot_stage": "both", # choices: "external", "cv", "both", "none"
+    "boxplot_metrics": ["MCC", "F1", "ACC", "AUC", "PR_AUC", "EF5%"],
+    "palette": "colorblind",
+    "dpi": 600,
+    "font": "Cambria", # choices: "Times New Roman", "Arial", "Cambria"
+}
+
+# %%
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,17 +40,7 @@ import seaborn as sns
 from matplotlib import rcParams
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
-DEFAULT_CONFIG: Dict[str, object] = {
-    "include_external": True,
-    "include_cv": False,
-    "boxplot_stage": "external",  # choices: external | cv | both
-    "boxplot_metrics": ["MCC", "F1", "ACC", "AUC", "PR_AUC", "EF5%"],
-    "dpi": 600,
-    "palette": "colorblind",
-    "font": "Times New Roman"
-}
-
-
+# %%
 def _configure_plotting(font: str):
     rcParams["font.family"] = "serif"
     rcParams["font.serif"] = font
@@ -49,6 +52,8 @@ def _configure_plotting(font: str):
     rcParams["figure.facecolor"] = "white"
     rcParams["savefig.facecolor"] = "white"
 
+
+# %%
 
 def _collect_prediction_files(base_dir: Path, stage: str) -> List[Path]:
     split_dirs = sorted(p for p in base_dir.glob("split_seed_*") if p.is_dir())
@@ -104,6 +109,8 @@ def _prepare_curves(prediction_files: List[Path]) -> Dict[str, Dict[str, List[np
             continue
     return curves
 
+
+# %%
 
 def _plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
                  output_path: Path,
@@ -193,6 +200,8 @@ def _plot_roc_pr(curves: Dict[str, Dict[str, List[np.ndarray]]],
     plt.close(fig)
 
 
+# %%
+
 def _metric_column(stage_df: pd.DataFrame, metric: str, stage: str) -> Optional[str]:
     if stage == "external":
         return metric if metric in stage_df.columns else None
@@ -207,6 +216,8 @@ def _metric_column(stage_df: pd.DataFrame, metric: str, stage: str) -> Optional[
             return col
     return None
 
+
+# %%
 
 def _prepare_metric_dataframe(row_data_path: Path, stage: str, metrics: List[str]) -> pd.DataFrame:
     if not row_data_path.exists():
@@ -284,38 +295,24 @@ def _plot_metric_boxplots(metric_df: pd.DataFrame, metrics: List[str], stage: st
     plt.close(fig)
 
 
+# %%
+
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate split seed metrics with publication styling.")
-    parser.add_argument("--base-dir", required=True, help="Run output directory containing split_seed_* folders.")
-    parser.add_argument("--output-dir", default=None, help="Directory to save resulting SVGs (defaults to base_dir/figures).")
-    parser.add_argument("--include-external", action="store_true", help="Enable External-stage curves/metrics.")
-    parser.add_argument("--include-cv", action="store_true", help="Enable CV-stage curves/metrics.")
-    parser.add_argument("--boxplot-stage", choices=["external", "cv", "both"], default="external",
-                        help="Which stage(s) to render the multi-metric boxplots for.")
-    parser.add_argument("--metrics", help="Comma-separated list of metric names for boxplots.")
-    parser.add_argument("--dpi", type=int, help="DPI used when saving the SVGs (vector format).")
-    parser.add_argument("--palette", choices=["colorblind", "deep"], default="colorblind",
-                        help="Seaborn palette for lines and boxes.")
-    args = parser.parse_args()
-
-    config = DEFAULT_CONFIG.copy()
-    config["include_external"] = args.include_external or config["include_external"]
-    config["include_cv"] = args.include_cv or config["include_cv"]
-    config["boxplot_stage"] = args.boxplot_stage
-    if args.metrics:
-        config["boxplot_metrics"] = [m.strip() for m in args.metrics.split(",") if m.strip()]
-    if args.dpi:
-        config["dpi"] = args.dpi
-    config["palette"] = args.palette
-
-    base_dir = Path(args.base_dir)
-    output_dir = Path(args.output_dir) if args.output_dir else base_dir / "figures"
+    base_dir = CONFIG["base_dir"]
+    output_dir = CONFIG["output_dir"] or base_dir / "figures"
+    include_external = CONFIG["include_external"]
+    include_cv = CONFIG["include_cv"]
+    boxplot_stage = CONFIG["boxplot_stage"]
+    boxplot_metrics = [m for m in CONFIG["boxplot_metrics"] if isinstance(m, str) and m.strip()]
+    palette = CONFIG["palette"]
+    dpi = CONFIG["dpi"]
+    font = CONFIG["font"]
     row_data_path = base_dir / "results" / "all_split_row_data.csv"
 
     stages = []
-    if config["include_external"]:
+    if include_external:
         stages.append("external")
-    if config["include_cv"]:
+    if include_cv:
         stages.append("cv")
     if not stages:
         raise SystemExit("At least one stage (--include-external or --include-cv) must be enabled.")
@@ -325,24 +322,26 @@ def main():
         curves = _prepare_curves(prediction_files)
         if curves:
             rocpr_path = output_dir / f"{stage}_roc_pr.svg"
-            _plot_roc_pr(curves, rocpr_path, stage, config["palette"], config["dpi"], config["font"])
+            _plot_roc_pr(curves, rocpr_path, stage, palette, dpi, font)
             print(f"Saved {stage} ROC/PR curves to {rocpr_path}")
 
     boxplot_stages = []
-    if config["boxplot_stage"] in ("external", "both"):
+    if boxplot_stage in ("external", "both"):
         boxplot_stages.append("external")
-    if config["boxplot_stage"] in ("cv", "both"):
+    if boxplot_stage in ("cv", "both"):
         boxplot_stages.append("cv")
 
     for stage in boxplot_stages:
-        metric_df = _prepare_metric_dataframe(row_data_path, stage, config["boxplot_metrics"])
+        metric_df = _prepare_metric_dataframe(row_data_path, stage, boxplot_metrics)
         if metric_df.empty:
             print(f"[WARN] No boxplot data found for stage '{stage}' (checked {row_data_path}).")
             continue
         boxplot_path = output_dir / f"{stage}_metric_boxplots.svg"
-        _plot_metric_boxplots(metric_df, config["boxplot_metrics"], stage, boxplot_path, config["palette"], config["dpi"], config["font"])
+        _plot_metric_boxplots(metric_df, boxplot_metrics, stage, boxplot_path, palette, dpi, font)
         print(f"Saved {stage} metric boxplots to {boxplot_path}")
 
+
+# %%
 
 if __name__ == "__main__":
     main()

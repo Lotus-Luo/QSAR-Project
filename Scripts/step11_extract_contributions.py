@@ -19,11 +19,24 @@ python Scripts/step11_extract_contributions.py \
   --background-size 50
 """
 
-import argparse
+# %%
+from pathlib import Path
+
+BASE_CONFIG = {
+    "project_root": Path("models_out/classification_20260330_151751"),
+    "model_key": "MLP",  # options: MLP | GAT | ChemBERTa
+    "seed": 42,
+    "external_data": Path("models_out/classification_20260330_151751/split_seed_30/data/splits/external_test.npz"),
+    "output_dir": Path("models_out/classification_20260330_151751/split_seed_30/exports/MLP/seed_42"),
+    "background_size": 50,
+    "chemberta_max_length": 128,
+    "device": None,
+}
+
+# %%
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -185,28 +198,19 @@ def main():
     if shap is None:
         sys.exit("Shap is required: pip install shap")
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-p", "--project-root", default="models_out", help="QSAR output directory")
-    parser.add_argument("-m", "--model-key", required=True, help="Model key (e.g., MLP)")
-    parser.add_argument("-s", "--seed", required=True, type=int, help="Seed identifier")
-    parser.add_argument("--external-data", type=Path, help="Path to saved external split (.npz)")
-    parser.add_argument("-o", "--output-dir", type=Path, help="Where to store exported contributions")
-    parser.add_argument("--background-size", type=int, default=50, help="Number of samples to build background reference")
-    parser.add_argument("--chemberta-max-length", type=int, default=128, help="Tokenization max length for ChemBERTa export")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="Device for model inference")
-    args = parser.parse_args()
-
-    project_root = Path(args.project_root)
-    seed_dir = project_root / "models" / "full_dev" / args.model_key / f"seed_{args.seed}"
+    project_root = BASE_CONFIG["project_root"]
+    seed_dir = project_root / "models" / "full_dev" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     if not seed_dir.exists():
         raise FileNotFoundError(f"Seed directory not found: {seed_dir}")
 
-    external_data_path = args.external_data or project_root / "data" / "splits" / "external_test.npz"
+    external_data_path = BASE_CONFIG["external_data"] or project_root / "data" / "splits" / "external_test.npz"
     external_data_path = Path(external_data_path)
     external_data = load_npz_data(external_data_path)
 
-    output_dir = args.output_dir or project_root / "exports" / args.model_key / f"seed_{args.seed}"
+    output_dir = BASE_CONFIG["output_dir"] or project_root / "exports" / BASE_CONFIG["model_key"] / f"seed_{BASE_CONFIG['seed']}"
     output_dir.mkdir(parents=True, exist_ok=True)
+        device_str = BASE_CONFIG["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
 
     metadata = _load_metadata(seed_dir)
     model_type = metadata.get('model_type', 'pytorch')
@@ -226,15 +230,11 @@ def main():
         model_config = metadata.get('model_config', {})
         input_dim = _determine_input_dim(metadata, X_ext, model_config)
         model = _instantiate_mlp(model_config, input_dim)
-        model_path = seed_dir / "model.pt"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model file missing: {model_path}")
-        device = torch.device(args.device)
         state = torch.load(model_path, map_location=device)
         model.load_state_dict(state)
         model = model.to(device).eval()
 
-        background = torch.tensor(X_ext[:args.background_size], dtype=torch.float32).to(device)
+        background = torch.tensor(X_ext[:BASE_CONFIG["background_size"]], dtype=torch.float32).to(device)
         dataset = torch.tensor(X_ext, dtype=torch.float32).to(device)
 
         explainer = shap.GradientExplainer(model, background)
@@ -261,10 +261,6 @@ def main():
             num_layers=3,
             dropout=0.3,
         )
-        model_path = seed_dir / "model.pt"
-        if not model_path.exists():
-            raise FileNotFoundError(f"GAT model file missing: {model_path}")
-        device = torch.device(args.device)
         state = torch.load(model_path, map_location=device)
         model.load_state_dict(state)
         model = model.to(device).eval()
@@ -305,7 +301,7 @@ def main():
         smiles_list = external_data.get('smiles') or []
         if not smiles_list:
             raise ValueError("SMILES strings are required for ChemBERTa export.")
-        max_length = args.chemberta_max_length
+        max_length = BASE_CONFIG["chemberta_max_length"]
         token_ids, attention_masks, token_offsets, token_strings, valid_indices = _encode_chemb_smiles(
             tokenizer,
             smiles_list,

@@ -9,29 +9,25 @@ python Scripts/step22_vs_filter_hits.py \
   --min-sum 2 \
   --min-score 0.8 
 """
-import argparse
+
+# %%
+from pathlib import Path
+
+FILTER_CONFIG = {
+    "input_path": Path("models_out/classification_20260326_213228/split_seed_3/predictions/predictions_20260328_211826.csv"),
+    "min_sum": 1,
+    "min_score": 0.8,
+    "output_path": Path("models_out/classification_20260326_213228/split_seed_3/predictions/predictions_20260328_211826_filtered_hits.csv"),
+    "log_level": "INFO",
+}
+
+# %%
 import logging
 import sys
-from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import pandas as pd
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Keep only molecules supported by enough models")
-    parser.add_argument("--input", "-i", type=Path, required=True,
-                        help="Prediction CSV produced by Scripts/step21_vs_inference.py")
-    parser.add_argument("--min-sum", type=int, default=1,
-                        help="Minimum number of models that must vote positive (>=1)")
-    parser.add_argument("--min-score", type=float, default=None,
-                        help="Require at least one model with score >= this value")
-    parser.add_argument("--output", "-o", type=Path, default=None,
-                        help="Output path (default: <input_stem>_filter_hits.csv)")
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Logging verbosity")
-    return parser.parse_args()
 
 
 def setup_logger(level: str) -> logging.Logger:
@@ -49,9 +45,8 @@ def find_score_columns(columns: List[str]) -> List[str]:
 
 
 def main():
-    args = parse_args()
-    logger = setup_logger(args.log_level)
-    input_path = args.input.resolve()
+    logger = setup_logger(FILTER_CONFIG["log_level"])
+    input_path = FILTER_CONFIG["input_path"].resolve()
     if not input_path.exists():
         raise SystemExit(f"Input file not found: {input_path}")
     df = pd.read_csv(input_path)
@@ -62,17 +57,17 @@ def main():
 
     consensus = df[predicted_cols].fillna(0).sum(axis=1)
     df["Consensus_Sum"] = consensus.astype(int)
-    mask = df["Consensus_Sum"] >= args.min_sum
+    mask = df["Consensus_Sum"] >= FILTER_CONFIG["min_sum"]
 
-    if args.min_score is not None:
+    if FILTER_CONFIG["min_score"] is not None:
         if not score_cols:
             logger.warning("--min-score provided but no *_predicted_score columns were found; ignoring this filter")
         else:
-            mask_score = df[score_cols].fillna(-float("inf")).ge(args.min_score).any(axis=1)
+            mask_score = df[score_cols].fillna(-float("inf")).ge(FILTER_CONFIG["min_score"]).any(axis=1)
             mask &= mask_score
 
     filtered = df[mask]
-    output_path = args.output or (input_path.parent / f"{input_path.stem}_filtered_hits.csv")
+    output_path = FILTER_CONFIG["output_path"] or (input_path.parent / f"{input_path.stem}_filtered_hits.csv")
     filtered.to_csv(output_path, index=False)
     logger.info(f"Saved {len(filtered)} out of {len(df)} candidates to {output_path}")
 

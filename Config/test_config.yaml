@@ -74,7 +74,7 @@ seeds: [42]
 # Multiple random split seeds (Stage 1/2)
 # Each seed reruns the Dev/External split plus CV folds; outputs go under `split_seed_<seed>/`.
 # Aggregated summaries and row-level data appear in `results/all_split_*` and `results/all_split_row_data.csv`.
-split_seeds: [4, 1, 2026]
+split_seeds: [4, 2, 2026]
 
 # Method for splitting data into train/validation/test sets
 # Options:
@@ -305,9 +305,7 @@ shap_max_display: 20
 # Options: 100 to 1000 (recommended: 500)
 shap_sample_size: 500
 
-# ------------------------------------------------------------------------------
-# Multi-Modal Fusion Configuration (Experimental)
-# ------------------------------------------------------------------------------
+
 # ------------------------------------------------------------------------------
 # Hyperparameter Tuning Configuration (Experimental)
 # ------------------------------------------------------------------------------
