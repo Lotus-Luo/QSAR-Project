@@ -241,6 +241,11 @@ class QSARConfig:
     learning_rate: float = 0.001
     early_stopping_patience: int = 25
     deep_learning_weight_decay: float = 1e-2
+    enable_supervised_contrastive: bool = True
+    contrastive_alpha: float = 0.5
+    contrastive_temperature: float = 0.07
+    contrastive_projection_hidden: int = 256
+    contrastive_projection_dim: int = 128
     gat_hyperparams: Dict[str, Any] = field(default_factory=lambda: {
         'hidden_dim': 64,
         'num_heads': 4,
@@ -998,6 +1003,21 @@ class ResidualBlock(nn.Module):
         return F.relu(x)
 
 
+class ProjectionHead(nn.Module):
+    """Simple two-layer projection head followed by L2 normalization."""
+    def __init__(self, input_dim: int, hidden_dim: int = 256, output_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        proj = self.net(x)
+        return F.normalize(proj, dim=-1, eps=1e-8)
+
+
 class ResidualMLP(nn.Module):
     """Generalized MLP backbone using configurable residual blocks."""
     def __init__(
@@ -1009,6 +1029,9 @@ class ResidualMLP(nn.Module):
         dropout: float = 0.3,
         use_residual: bool = True,
         norm_type: str = "layernorm",
+        projection_hidden_dim: int = 256,
+        projection_dim: int = 128,
+        enable_projection: bool = True,
     ):
         super(ResidualMLP, self).__init__()
         if hidden_dims is None:
@@ -1028,11 +1051,18 @@ class ResidualMLP(nn.Module):
         ])
         final_dim = dims[-1]
         self.output_layer = nn.Linear(final_dim, output_dim)
+        self.enable_projection = enable_projection
+        if self.enable_projection:
+            self.projection_head = ProjectionHead(final_dim, projection_hidden_dim, projection_dim)
+            self.contrastive_mode = 'supcon'
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_projection: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         for block in self.blocks:
             x = block(x)
-        return self.output_layer(x)
+        logits = self.output_layer(x)
+        if return_projection and self.enable_projection:
+            return logits, self.projection_head(x)
+        return logits
 
 # --------- GAT Model (Graph Attention Network) ---------
 try:
@@ -1084,8 +1114,10 @@ try:
 
     class GATModel(nn.Module):
         """Graph Attention Network for molecular graphs"""
-        def __init__(self, num_node_features: int, num_edge_features: int, hidden_dim: int = 64, 
-                     num_heads: int = 4, num_layers: int = 3, dropout: float = 0.3):
+        def __init__(self, num_node_features: int, num_edge_features: int, hidden_dim: int = 64,
+                     num_heads: int = 4, num_layers: int = 3, dropout: float = 0.3,
+                     projection_hidden_dim: int = 256,
+                     projection_dim: int = 128):
             super(GATModel, self).__init__()
             self.encoder = GATEncoder(
                 num_node_features=num_node_features,
@@ -1096,10 +1128,15 @@ try:
                 dropout=dropout,
             )
             self.fc = nn.Linear(self.encoder.output_dim, 1)
-        
-        def forward(self, x, edge_index, batch, edge_attr=None, **kwargs):
+            self.projection_head = ProjectionHead(self.encoder.output_dim, projection_hidden_dim, projection_dim)
+            self.contrastive_mode = 'supcon'
+
+        def forward(self, x, edge_index, batch, edge_attr=None, return_projection: bool = False, **kwargs):
             x = self.encoder(x, edge_index, batch, edge_attr=edge_attr)
-            return self.fc(x).squeeze(dim=-1)
+            logits = self.fc(x).squeeze(dim=-1)
+            if return_projection:
+                return logits, self.projection_head(x)
+            return logits
 
 
     class HybridGATFingerprintModel(nn.Module):
@@ -1111,7 +1148,9 @@ try:
                      fusion_hidden_dims: Optional[List[int]] = None,
                      dropout: float = 0.3,
                      freeze_gat: bool = False,
-                     freeze_fp: bool = False):
+                     freeze_fp: bool = False,
+                     projection_hidden_dim: int = 256,
+                     projection_dim: int = 128):
             super(HybridGATFingerprintModel, self).__init__()
             self.gat_encoder = GATEncoder(**gat_params)
             fp_hidden_dims = fp_hidden_dims or [128, 128]
@@ -1135,6 +1174,9 @@ try:
                 use_residual=True,
                 norm_type="layernorm"
             )
+            self.gat_projection_head = ProjectionHead(self.gat_encoder.output_dim, projection_hidden_dim, projection_dim)
+            self.fp_projection_head = ProjectionHead(fp_output_dim, projection_hidden_dim, projection_dim)
+            self.contrastive_mode = 'cross_modal'
             if freeze_gat:
                 for param in self.gat_encoder.parameters():
                     param.requires_grad = False
@@ -1142,13 +1184,18 @@ try:
                 for param in self.fp_encoder.parameters():
                     param.requires_grad = False
 
-        def forward(self, x, edge_index, batch, edge_attr=None, fingerprint_features=None, **kwargs):
+        def forward(self, x, edge_index, batch, edge_attr=None, fingerprint_features=None, return_projection: bool = False, **kwargs):
             if fingerprint_features is None:
                 raise ValueError("HybridGATFingerprintModel requires fingerprint_features")
             graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
             fp_repr = self.fp_encoder(fingerprint_features)
             fused = torch.cat([graph_repr, fp_repr], dim=-1)
-            return self.fusion_head(fused).squeeze(-1)
+            logits = self.fusion_head(fused).squeeze(-1)
+            if return_projection:
+                graph_proj = self.gat_projection_head(graph_repr)
+                fp_proj = self.fp_projection_head(fp_repr)
+                return logits, graph_proj, fp_proj
+            return logits
     
     GAT_AVAILABLE = True
 except ImportError:
@@ -1441,7 +1488,9 @@ try:
                      model_name: str = "DeepChem/ChemBERTa-77M-MLM",
                      num_labels: int = 1,
                      dropout: float = 0.3,
-                     freeze_transformer_layers: int = 0):
+                     freeze_transformer_layers: int = 0,
+                     projection_hidden_dim: int = 256,
+                     projection_dim: int = 128):
             super(ChemBERTaModel, self).__init__()
 
             load_path, use_local = _resolve_chemberta_load_path(model_name)
@@ -1464,20 +1513,25 @@ try:
             self.classifier = nn.Sequential(
                 nn.LayerNorm(self.hidden_size),
                 nn.Dropout(dropout),
-                nn.Linear(self.hidden_size, 1)
             )
+            self.prediction_head = nn.Linear(self.hidden_size, 1)
+            self.projection_head = ProjectionHead(self.hidden_size, projection_hidden_dim, projection_dim)
+            self.contrastive_mode = 'supcon'
             self.freeze_transformer_layers = freeze_transformer_layers
             self.frozen_layers = 0
             if self.freeze_transformer_layers > 0:
                 self.frozen_layers = _freeze_transformer_layers(self.model, self.freeze_transformer_layers)
                 print(f"[INFO] ChemBERTaModel: freezed first {self.frozen_layers} transformer layer(s)")
-
-        def forward(self, input_ids, attention_mask):
+        
+        def forward(self, input_ids, attention_mask, return_projection: bool = False):
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
             pooled = outputs.pooler_output
             if pooled is None:
                 pooled = outputs.last_hidden_state.mean(dim=1)
-            logits = self.classifier(pooled).squeeze(-1)
+            features = self.classifier(pooled)
+            logits = self.prediction_head(features).squeeze(-1)
+            if return_projection:
+                return logits, self.projection_head(features)
             return logits
 
     class ChemBERTaEncoder(nn.Module):
@@ -1519,7 +1573,9 @@ try:
                      freeze_gat: bool = False,
                      freeze_bert: bool = False,
                      freeze_transformer_layers: int = 0,
-                     bert_encoder: Optional['ChemBERTaEncoder'] = None):
+                     bert_encoder: Optional['ChemBERTaEncoder'] = None,
+                     projection_hidden_dim: int = 256,
+                     projection_dim: int = 128):
             super(HybridGATChemBERTaFusionModel, self).__init__()
             self.gat_encoder = GATEncoder(**gat_params)
             self.bert_encoder = bert_encoder or ChemBERTaEncoder(
@@ -1537,6 +1593,9 @@ try:
                 use_residual=True,
                 norm_type="layernorm"
             )
+            self.gat_projection_head = ProjectionHead(self.gat_encoder.output_dim, projection_hidden_dim, projection_dim)
+            self.bert_projection_head = ProjectionHead(self.bert_encoder.hidden_size, projection_hidden_dim, projection_dim)
+            self.contrastive_mode = 'cross_modal'
             if freeze_gat:
                 for param in self.gat_encoder.parameters():
                     param.requires_grad = False
@@ -1545,13 +1604,18 @@ try:
                     param.requires_grad = False
 
         def forward(self, x, edge_index, batch, edge_attr=None, fingerprint_features=None,
-                    input_ids=None, attention_mask=None, **kwargs):
+                    input_ids=None, attention_mask=None, return_projection: bool = False, **kwargs):
             if input_ids is None or attention_mask is None:
                 raise ValueError("HybridGATChemBERTaFusionModel requires ChemBERTa inputs")
             graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
             bert_repr = self.bert_encoder(input_ids, attention_mask)
             fused = torch.cat([graph_repr, bert_repr], dim=-1)
-            return self.fusion_head(fused).squeeze(-1)
+            logits = self.fusion_head(fused).squeeze(-1)
+            if return_projection:
+                graph_proj = self.gat_projection_head(graph_repr)
+                bert_proj = self.bert_projection_head(bert_repr)
+                return logits, graph_proj, bert_proj
+            return logits
     
     CHEMBERTA_AVAILABLE = True
 except ImportError:
@@ -2024,6 +2088,47 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
     
     return registry
 
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Loss with label-aware positives."""
+    def __init__(self, temperature: float = 0.07, eps: float = 1e-8):
+        super().__init__()
+        self.temperature = temperature
+        self.eps = eps
+
+    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        if features.size(0) < 2:
+            return torch.tensor(0.0, device=features.device, requires_grad=True)
+        device = features.device
+        features = F.normalize(features, dim=1)
+        labels = labels.view(-1, 1)
+        mask = torch.eq(labels, labels.T).float().to(device)
+        diag = torch.eye(mask.size(0), device=device)
+        mask = mask * (1.0 - diag)
+        logits = torch.matmul(features, features.T) / self.temperature
+        exp_logits = torch.exp(logits) * (1.0 - diag)
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + self.eps)
+        denom = mask.sum(1)
+        valid = denom > 0
+        if not valid.any():
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (denom + self.eps)
+        loss = -mean_log_prob_pos[valid].mean()
+        return loss
+
+def cross_modal_info_nce(anchor: torch.Tensor, positive: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+    """InfoNCE loss comparing anchors to positives (e.g., graph vs. text)."""
+    if anchor.size(0) == 0 or positive.size(0) == 0:
+        return torch.tensor(0.0, device=anchor.device, requires_grad=True)
+    logits = torch.matmul(anchor, positive.T) / temperature
+    labels = torch.arange(logits.size(0), device=logits.device)
+    loss = F.cross_entropy(logits, labels)
+    return loss
+
+def hybrid_contrastive_loss(graph_proj: torch.Tensor, bert_proj: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+    loss_a2b = cross_modal_info_nce(graph_proj, bert_proj, temperature)
+    loss_b2a = cross_modal_info_nce(bert_proj, graph_proj, temperature)
+    return (loss_a2b + loss_b2a) / 2.0
+
 # --------- Training Functions ---------
 def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig, 
                        task: str = "classification", logger: logging.Logger = None,
@@ -2096,6 +2201,71 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
         optimizer = torch.optim.Adam(model.parameters(), lr=base_lr, weight_decay=wt_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
+    contrastive_mode = getattr(model, "contrastive_mode", None)
+    use_contrastive = (
+        contrastive_mode in {"supcon", "cross_modal"} and
+        getattr(config, "enable_supervised_contrastive", True)
+    )
+    contrastive_alpha = min(max(getattr(config, "contrastive_alpha", 0.5), 0.0), 1.0)
+    contrastive_temperature = getattr(config, "contrastive_temperature", 0.07)
+    supcon_loss_fn = SupConLoss(contrastive_temperature) if contrastive_mode == "supcon" else None
+
+    def _forward_batch(batch_item, return_projection: bool = False):
+        data_batch = None
+        extras = {}
+        DataClass = globals().get('Data')
+        if DataClass is not None:
+            if isinstance(batch_item, tuple) and isinstance(batch_item[0], DataClass):
+                data_batch, extras = batch_item
+            elif isinstance(batch_item, DataClass):
+                data_batch = batch_item
+
+        if data_batch is not None:
+            data_batch = data_batch.to(device)
+            labels = data_batch.y.view(-1)
+            fp_tensor = extras.get('fp_features')
+            input_ids = extras.get('input_ids')
+            attention_mask = extras.get('attention_mask')
+            if fp_tensor is not None:
+                fp_tensor = fp_tensor.to(device)
+            if input_ids is not None:
+                input_ids = input_ids.to(device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+            outputs = model(
+                data_batch.x,
+                data_batch.edge_index,
+                data_batch.batch,
+                edge_attr=getattr(data_batch, "edge_attr", None),
+                fingerprint_features=fp_tensor,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_projection=return_projection
+            )
+        elif isinstance(batch_item, (list, tuple)) and len(batch_item) == 2:
+            inputs, labels = batch_item
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            outputs = model(inputs, return_projection=return_projection)
+        else:
+            input_ids = batch_item['input_ids'].to(device)
+            attention_mask = batch_item['attention_mask'].to(device)
+            labels = batch_item['label'].to(device)
+            if input_ids.size(0) == 0:
+                return None
+            outputs = model(input_ids, attention_mask, return_projection=return_projection)
+
+        if isinstance(outputs, tuple):
+            logits = outputs[0]
+            projections = outputs[1:]
+        else:
+            logits = outputs
+            projections = None
+
+        logits = logits.view(-1)
+        labels = labels.view(-1)
+        return logits, labels, projections
+    
     # Loss function
     # Use BCEWithLogitsLoss for classification for better numerical stability
     # This combines sigmoid and BCE in a single function for improved stability
@@ -2123,97 +2293,70 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
     patience_counter = 0
     best_model_state = None
     best_epoch = 0
-    
-    # Training loop with epoch-wise tracking
+
     for epoch in range(config.max_epochs):
-        # Training
         model.train()
         train_loss = 0.0
+        contrastive_loss_accum = 0.0
         num_train_batches_processed = 0
-        
-        # Progress bar for training
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Train]", 
-                    leave=False, disable=logger is None)
-        
-        for batch in pbar:
-            # Handle different batch formats
-            data_batch = None
-            extras = {}
-            if isinstance(batch, tuple) and isinstance(batch[0], Data):
-                data_batch, extras = batch
-            elif isinstance(batch, Data):
-                data_batch = batch
 
-            if data_batch is not None:
-                data_batch = data_batch.to(device)
-                labels = data_batch.y
-                fp_tensor = extras.get('fp_features')
-                input_ids = extras.get('input_ids')
-                attn_mask = extras.get('attention_mask')
-                if fp_tensor is not None:
-                    fp_tensor = fp_tensor.to(device)
-                if input_ids is not None:
-                    input_ids = input_ids.to(device)
-                if attn_mask is not None:
-                    attn_mask = attn_mask.to(device)
-                optimizer.zero_grad()
-                outputs = model(
-                    data_batch.x,
-                    data_batch.edge_index,
-                    data_batch.batch,
-                    edge_attr=getattr(data_batch, "edge_attr", None),
-                    fingerprint_features=fp_tensor,
-                    input_ids=input_ids,
-                    attention_mask=attn_mask
-                )
-                loss = criterion(outputs, labels)
-            elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
-                inputs, labels = batch
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(inputs).squeeze(-1)
-                loss = criterion(outputs, labels)
-            else:  # ChemBERTa (transformer)
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['label'].to(device)
-                # Skip fully-empty collated batches (e.g., when all SMILES were empty)
-                if input_ids.size(0) == 0:
-                    continue
-                optimizer.zero_grad()
-                outputs = model(input_ids, attention_mask)
-                loss = criterion(outputs, labels)
-            
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Train]",
+                    leave=False, disable=logger is None)
+
+        for batch in pbar:
+            forward_result = _forward_batch(batch, return_projection=use_contrastive)
+            if forward_result is None:
+                continue
+            logits, labels, projections = forward_result
+            optimizer.zero_grad()
+            bce_loss = criterion(logits, labels)
+            contrastive_loss = None
+            if use_contrastive and projections:
+                if contrastive_mode == "supcon" and supcon_loss_fn is not None:
+                    contrastive_loss = supcon_loss_fn(projections[0], labels.long())
+                elif contrastive_mode == "cross_modal" and len(projections) >= 2:
+                    contrastive_loss = hybrid_contrastive_loss(
+                        projections[0], projections[1], contrastive_temperature
+                    )
+            loss = bce_loss
+            if contrastive_loss is not None:
+                loss = contrastive_alpha * bce_loss + (1.0 - contrastive_alpha) * contrastive_loss
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
+            if contrastive_loss is not None:
+                contrastive_loss_accum += contrastive_loss.item()
             num_train_batches_processed += 1
-            
-            # Update progress bar
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-        
+
+            postfix = {'loss': f'{loss.item():.4f}'}
+            if contrastive_loss is not None:
+                postfix['contrastive'] = f'{contrastive_loss.item():.4f}'
+            pbar.set_postfix(postfix)
+
         pbar.close()
         if num_train_batches_processed == 0:
             logger.warning("No non-empty batches processed during training; aborting training loop.")
             break
+
         train_loss /= num_train_batches_processed
+        avg_contrastive_loss = (
+            contrastive_loss_accum / num_train_batches_processed if use_contrastive else float('nan')
+        )
 
         # Clear GPU cache after each epoch to prevent OOM, especially for transformer models
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Validation (skip if val_loader is None)
         if val_loader is None:
-            # No validation set - use training loss as proxy
             val_loss = train_loss
-            logger.info(f"Epoch {epoch+1}/{config.max_epochs} - Train Loss: {train_loss:.4f} (No validation set)")
-            
-            # Update scheduler based on epoch (for CosineAnnealingLR)
+            log_chunks = [f"Train Loss: {train_loss:.4f}"]
+            if use_contrastive:
+                log_chunks.append(f"Contrastive: {avg_contrastive_loss:.4f}")
+            logger.info(f"Epoch {epoch+1}/{config.max_epochs} - " + ", ".join(log_chunks) + " (No validation set)")
+
             if model_type == "transformer":
                 scheduler.step()
-            
-            # No validation set - save best model based on training loss
+
             if train_loss < best_val_loss:
                 best_val_loss = train_loss
                 patience_counter = 0
@@ -2225,82 +2368,32 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
             all_preds = []
             all_labels = []
             num_val_batches_processed = 0
-            
-            with torch.no_grad():
-                # Progress bar for validation
-                pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Val]", 
-                              leave=False, disable=logger is None)
-                
-                for batch in pbar_val:
-                    data_batch = None
-                    extras = {}
-                    if isinstance(batch, tuple) and isinstance(batch[0], Data):
-                        data_batch, extras = batch
-                    elif isinstance(batch, Data):
-                        data_batch = batch
 
-                    if data_batch is not None:
-                        data_batch = data_batch.to(device)
-                        labels = data_batch.y
-                        fp_tensor = extras.get('fp_features')
-                        input_ids = extras.get('input_ids')
-                        attn_mask = extras.get('attention_mask')
-                        if fp_tensor is not None:
-                            fp_tensor = fp_tensor.to(device)
-                        if input_ids is not None:
-                            input_ids = input_ids.to(device)
-                        if attn_mask is not None:
-                            attn_mask = attn_mask.to(device)
-                        outputs = model(
-                            data_batch.x,
-                            data_batch.edge_index,
-                            data_batch.batch,
-                            edge_attr=getattr(data_batch, "edge_attr", None),
-                            fingerprint_features=fp_tensor,
-                            input_ids=input_ids,
-                            attention_mask=attn_mask
-                        )
-                        loss = criterion(outputs, labels)
-                    elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
-                        inputs, labels = batch
-                        inputs = inputs.to(device)
-                        labels = labels.to(device)
-                        outputs = model(inputs).squeeze(-1)
-                        loss = criterion(outputs, labels)
-                    else:  # ChemBERTa (transformer)
-                        input_ids = batch['input_ids'].to(device)
-                        attention_mask = batch['attention_mask'].to(device)
-                        labels = batch['label'].to(device)
-                        # Skip fully-empty collated batches
-                        if input_ids.size(0) == 0:
-                            continue
-                        outputs = model(input_ids, attention_mask)
-                        loss = criterion(outputs, labels)
-                    
+            with torch.no_grad():
+                pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.max_epochs} [Val]",
+                                leave=False, disable=logger is None)
+
+                for batch in pbar_val:
+                    forward_result = _forward_batch(batch, return_projection=False)
+                    if forward_result is None:
+                        continue
+                    logits, labels, _ = forward_result
+                    loss = criterion(logits, labels)
                     val_loss += loss.item()
                     num_val_batches_processed += 1
-                    
-                    # Collect predictions
-                    all_preds.extend(outputs.cpu().numpy())
+                    all_preds.extend(logits.cpu().numpy())
                     all_labels.extend(labels.cpu().numpy())
-                    
-                    # Update progress bar
                     pbar_val.set_postfix({'loss': f'{loss.item():.4f}'})
-                
                 pbar_val.close()
-            
+
             if num_val_batches_processed == 0:
                 val_loss = float('inf')
             else:
                 val_loss /= num_val_batches_processed
-            
-            # Calculate validation metrics
+
             if task == "classification":
-                # Apply sigmoid to logits for metric calculation
                 val_preds_proba = torch.sigmoid(torch.tensor(all_preds)).numpy()
                 val_preds_binary = (val_preds_proba >= threshold).astype(int)
-                
-                # Calculate comprehensive metrics
                 try:
                     val_auc = float(roc_auc_score(all_labels, val_preds_proba))
                 except Exception as e:
@@ -2312,29 +2405,31 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
                 except Exception as e:
                     logger.warning(f"  Val ACC computation failed ({e}); setting ACC=NaN")
                     val_acc = float('nan')
-                
-                # Log all key metrics for each epoch
-                logger.info(
-                    f"Epoch {epoch+1}/{config.max_epochs} - "
-                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                    f"Val AUC: {val_auc:.4f}, Val ACC: {val_acc:.4f}"
-                )
+                log_chunks = [
+                    f"Train Loss: {train_loss:.4f}",
+                    f"Val Loss: {val_loss:.4f}",
+                    f"Val AUC: {val_auc:.4f}",
+                    f"Val ACC: {val_acc:.4f}"
+                ]
+                if use_contrastive:
+                    log_chunks.insert(1, f"Contrastive: {avg_contrastive_loss:.4f}")
             else:
                 val_r2 = float(r2_score(all_labels, all_preds))
-                logger.info(
-                    f"Epoch {epoch+1}/{config.max_epochs} - "
-                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val R2: {val_r2:.4f}"
-                )
-            
-            # Learning rate scheduling
+                log_chunks = [
+                    f"Train Loss: {train_loss:.4f}",
+                    f"Val Loss: {val_loss:.4f}",
+                    f"Val R2: {val_r2:.4f}"
+                ]
+                if use_contrastive:
+                    log_chunks.insert(1, f"Contrastive: {avg_contrastive_loss:.4f}")
+
+            logger.info(f"Epoch {epoch+1}/{config.max_epochs} - " + ", ".join(log_chunks))
+
             if model_type == "transformer":
-                # CosineAnnealingLR steps by epoch
                 scheduler.step()
             else:
-                # ReduceLROnPlateau steps by validation loss
                 scheduler.step(val_loss)
-            
-            # Early stopping (skip if no validation set - train all epochs)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -2364,17 +2459,18 @@ def predict_pytorch_model(model, data_loader, task: str = "classification", thre
     model.eval()
     
     all_preds = []
-    
+
+    def _unwrap_output(raw_output):
+        if isinstance(raw_output, tuple):
+            return raw_output[0]
+        return raw_output
+
     with torch.no_grad():
         for batch in data_loader:
-            data_batch = None
-            extras = {}
-            if isinstance(batch, tuple) and isinstance(batch[0], Data):
+            outputs = None
+            DataClass = globals().get('Data')
+            if DataClass is not None and isinstance(batch, tuple) and isinstance(batch[0], DataClass):
                 data_batch, extras = batch
-            elif isinstance(batch, Data):
-                data_batch = batch
-
-            if data_batch is not None:
                 data_batch = data_batch.to(device)
                 fp_tensor = extras.get('fp_features')
                 input_ids = extras.get('input_ids')
@@ -2392,20 +2488,34 @@ def predict_pytorch_model(model, data_loader, task: str = "classification", thre
                     edge_attr=getattr(data_batch, "edge_attr", None),
                     fingerprint_features=fp_tensor,
                     input_ids=input_ids,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
+                    return_projection=False
                 )
-            elif isinstance(batch, (list, tuple)) and len(batch) == 2:  # MLP
+            elif DataClass is not None and isinstance(batch, DataClass):
+                data_batch = batch.to(device)
+                outputs = model(
+                    data_batch.x,
+                    data_batch.edge_index,
+                    data_batch.batch,
+                    edge_attr=getattr(data_batch, "edge_attr", None),
+                    return_projection=False
+                )
+            elif isinstance(batch, (list, tuple)) and len(batch) == 2:
                 inputs, _ = batch
                 inputs = inputs.to(device)
-                outputs = model(inputs).squeeze(-1)
-            else:  # ChemBERTa
+                outputs = model(inputs, return_projection=False)
+            else:
                 input_ids = batch['input_ids'].to(device)
                 if input_ids.size(0) == 0:
                     continue
                 attention_mask = batch['attention_mask'].to(device)
-                outputs = model(input_ids, attention_mask)
-            
-            all_preds.extend(outputs.cpu().numpy())
+                outputs = model(input_ids, attention_mask, return_projection=False)
+
+            if outputs is None:
+                continue
+
+            logits = _unwrap_output(outputs).view(-1)
+            all_preds.extend(logits.cpu().numpy())
     
     all_preds = np.array(all_preds)
     

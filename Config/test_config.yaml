@@ -209,6 +209,14 @@ batch_size: 32
 # Lower values may converge slower but more stable
 learning_rate: 0.001
 
+# Supervised contrastive learning knobs
+# These control whether joint SupCon training happens and how losses mix.
+enable_supervised_contrastive: true
+contrastive_alpha: 0.5
+contrastive_temperature: 0.07
+contrastive_projection_hidden: 256
+contrastive_projection_dim: 128
+
 # Early stopping patience (number of epochs to wait before stopping)
 # Training stops if validation loss doesn't improve for this many epochs
 # Options: 20 to 30 (recommended: 25)
