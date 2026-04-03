@@ -11,7 +11,7 @@ problem.txt
 # 忽略 VS Code 配置
 .vscode/
 
-# 忽略大型数据文件（如果你的数据集很大，建议忽略）
+# 忽略大型数据文件
 *.csv
 *.sdf
 *.png
@@ -32,7 +32,11 @@ _smoke_out_regression_nan_alignment/
 _smoke_out_regression_nan_alignment/
 
 # 排除待上传的脚本
-Script/smoke_test_qsar_modeling_pytorch.py
+Scripts/step02_run_smoke_test.py
+Sctipts/step001_data_cluster.py
+Scripts/step000_data_clean.py
+Shap_config/
+
 
 # ignore data processing scripts
 Scripts/step00_data_clean.ipynb
@@ -42,3 +46,4 @@ Environment/env_install_suse.txt
 
 # ignore specific target config yaml files
 Config/nsd2_config.yaml
+Config/jak3.yaml

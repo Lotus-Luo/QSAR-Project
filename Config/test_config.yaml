@@ -140,6 +140,7 @@ external_test_metric: "MCC"
 #   selected_models: ["XGBC", "RFC", "MLP"]           # Traditional + MLP
 #   selected_models: ["MLP", "GAT", "ChemBERTa"]      # Deep learning only
 #   selected_models: ["LR","RFC","SVC","XGBC","ETC"]   # Traditional only
+#   selected_models: ["Hybrid_GAT_FP","Hybrid_GAT_FP"]        # Hybrid models only
 #   selected_models: []                               # Train all available models
 selected_models: ["GAT","ChemBERTa","LR","MLP","Hybrid_GAT_FP","Hybrid_GAT_BERT"]
 
