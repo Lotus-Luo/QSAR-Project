@@ -33,7 +33,8 @@ _smoke_out_regression_nan_alignment/
 
 # 排除待上传的脚本
 Scripts/step02_run_smoke_test.py
-Sctipts/step001_data_cluster.py
+Scripts/step001_data_cluster_tSNE.py
+Scripts/step001_data_cluster_PCA_tSNE.py
 Scripts/step000_data_clean.py
 Shap_config/
 

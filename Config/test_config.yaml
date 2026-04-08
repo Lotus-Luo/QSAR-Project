@@ -192,6 +192,35 @@ auto_generate_fingerprints: true
 #   fingerprint_types: ["morgan", "rdkit", "maccs"]    # Multiple types
 fingerprint_types: ["morgan"]
 
+# RDKit descriptor augmentation
+# When enabled, the script computes the named RDKit Descriptors for each SMILES molecule
+# and appends them to the fingerprint feature matrix. These descriptors help hybrid/deep models
+# see physicochemical signals in addition to hashed bits.
+use_rdkit_physchem_descriptors: true
+rdkit_descriptor_names:
+  - "MolWt"
+  - "ExactMolWt"
+  - "HeavyAtomCount"
+  - "NumHAcceptors"
+  - "NumHDonors"
+  - "NumRotatableBonds"
+  - "TPSA"
+  - "MolLogP"
+  - "MolMR"
+  - "RingCount"
+  - "NumSaturatedRings"
+  - "NumAliphaticRings"
+  - "NumAromaticRings"
+  - "NumSpiroAtoms"
+  - "NumBridgeheadAtoms"
+  - "FractionCSP3"
+  - "NumHeteroatoms"
+  - "HallKierAlpha"
+  - "BalabanJ"
+  - "Kappa2"
+descriptor_projection_enabled: true
+descriptor_projection_type: "scale" # "linear", "scale"
+
 # ------------------------------------------------------------------------------
 # Deep Learning Hyperparameters
 # ------------------------------------------------------------------------------
@@ -227,22 +256,38 @@ early_stopping_patience: 25
 # Defaulted to 1e-2 to regularize transformer fine-tuning + GAT/LSTM heads.
 deep_learning_weight_decay: 0.01
 
+# MLP (Multi-Layer Perceptron) specific overrides
+mlp_hyperparams:
+  hidden_units: [512, 256, 128]
+  dropout: 0.3
+  learning_rate: 0.0005
+  weight_decay: 1e-4
+  use_batch_norm: true
+
 # GAT-specific optimizer/architecture overrides
 gat_hyperparams:
-  hidden_dim: 64
-  num_heads: 4  # Attention heads tuned for richer message passing
-  num_layers: 3
-  dropout: 0.3
-  learning_rate: 0.001
-  weight_decay: 0.01
+  hidden_dim: 32
+  num_heads: 8  # Attention heads tuned for richer message passing
+  num_layers: 2
+  dropout: 0.2
+  learning_rate: 0.0005
+  weight_decay: 1e-4
+  use_residual: true
 
 # ChemBERTa-specific overrides (used for transformer-only and hybrid models)
 chemberta_hyperparams:
   model_name: "DeepChem/ChemBERTa-77M-MLM"
-  dropout: 0.1
-  freeze_transformer_layers: 2  # Freeze the first two of the three layers for head-only fine-tuning
-  learning_rate: 5e-5
+  dropout: 0.2
+  freeze_transformer_layers: 1  # Freeze the first layer for head-only fine-tuning
+  learning_rate: 3e-5
   weight_decay: 0.01
+
+# Hybrid fusion model overrides
+hybrid_model_params:
+  fusion_strategy: "attention"   # "concat" "attention"
+  contrastive_alpha: 0.08   
+  learning_rate: 0.0003
+  weight_decay: 1e-4
 
 # SMILES augmentation configuration (applied only to training folds)
 smiles_augmentation:

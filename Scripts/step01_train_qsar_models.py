@@ -246,6 +246,13 @@ class QSARConfig:
     contrastive_temperature: float = 0.07
     contrastive_projection_hidden: int = 256
     contrastive_projection_dim: int = 128
+    mlp_hyperparams: Dict[str, Any] = field(default_factory=lambda: {
+        'hidden_units': [512, 256, 128],
+        'dropout': 0.3,
+        'learning_rate': 0.0005,
+        'weight_decay': 1e-4,
+        'use_batch_norm': True,
+    })
     gat_hyperparams: Dict[str, Any] = field(default_factory=lambda: {
         'hidden_dim': 64,
         'num_heads': 4,
@@ -260,6 +267,12 @@ class QSARConfig:
         'freeze_transformer_layers': 10,
         'learning_rate': 5e-5,
         'weight_decay': 0.01,
+    })
+    hybrid_model_params: Dict[str, Any] = field(default_factory=lambda: {
+        'fusion_strategy': 'concat',
+        'contrastive_alpha': 0.5,
+        'learning_rate': 0.0003,
+        'weight_decay': 1e-4,
     })
     smiles_augmentation: Dict[str, Any] = field(default_factory=lambda: {
         'enabled': True,
@@ -288,6 +301,33 @@ class QSARConfig:
     # Automatic fingerprint generation settings
     auto_generate_fingerprints: bool = True  # Automatically generate fingerprints if needed
     fingerprint_types: List[str] = field(default_factory=lambda: ["morgan"])  # Types to generate
+    use_rdkit_physchem_descriptors: bool = False
+    rdkit_descriptor_names: List[str] = field(default_factory=lambda: [
+        "MolWt",
+        "ExactMolWt",
+        "HeavyAtomCount",
+        "NumHAcceptors",
+        "NumHDonors",
+        "NumRotatableBonds",
+        "TPSA",
+        "MolLogP",
+        "MolMR",
+        "RingCount",
+        "NumSaturatedRings",
+        "NumAliphaticRings",
+        "NumAromaticRings",
+        "NumSpiroAtoms",
+        "NumBridgeheadAtoms",
+        "FractionCSP3",
+        "NumHeteroatoms",
+        "HallKierAlpha",
+        "BalabanJ",
+        "Kappa2",
+    ])
+    descriptor_feature_names: List[str] = field(default_factory=list)
+    descriptor_feature_dim: int = 0
+    descriptor_projection_enabled: bool = True
+    descriptor_projection_type: str = "scale"
     
     # Metric for selecting best model on external test set 
     external_test_metric: str = "MCC"  # (classification: AUC, PR_AUC, ACC, F1, MCC; regression: R2, RMSE, MAE)
@@ -621,6 +661,70 @@ def select_fp_columns(df: pd.DataFrame) -> List[str]:
         if pd.api.types.is_numeric_dtype(df[c]) and str(c).startswith(FP_PREFIXES):
             cols.append(c)
     return cols
+
+
+def filter_fingerprint_features(fp_df: pd.DataFrame, config: QSARConfig,
+                                logger: Optional[logging.Logger] = None) -> Tuple[List[str], np.ndarray]:
+    """Apply frequency and variance filtering to fingerprint-only columns."""
+    fp_cols = list(fp_df.columns)
+    if not fp_cols:
+        return [], np.zeros(0, dtype=bool)
+
+    X = fp_df.to_numpy(dtype=float)
+    n_features = len(fp_cols)
+    freq_mask = np.ones(n_features, dtype=bool)
+
+    if config.min_frequency > 0 and np.all(np.isin(X, [0, 1])):
+        n_samples = X.shape[0]
+        min_count = int(max(1, n_samples * config.min_frequency))
+        feature_counts = np.sum(X, axis=0)
+        freq_mask = (feature_counts >= min_count) & (feature_counts <= n_samples - min_count)
+        kept = int(np.sum(freq_mask))
+        if logger:
+            logger.info(
+                f"Fingerprint frequency filtering: {n_features} → {kept} features (min_frequency={config.min_frequency*100:.1f}%)"
+            )
+    else:
+        if logger:
+            logger.info("Skipping fingerprint frequency filtering (non-binary fingerprint block or min_frequency<=0)")
+
+    final_mask = freq_mask.copy()
+    freq_indices = np.where(freq_mask)[0]
+    if config.variance_threshold > 0 and freq_indices.size > 0:
+        from sklearn.feature_selection import VarianceThreshold
+
+        selector = VarianceThreshold(threshold=config.variance_threshold)
+        subset = X[:, freq_mask]
+        if subset.shape[1] > 0:
+            selector.fit(subset)
+            support = selector.get_support()
+            final_mask[:] = False
+            final_mask[freq_indices[support]] = True
+            kept = int(np.sum(final_mask))
+            if logger:
+                logger.info(
+                    f"Fingerprint variance filtering: {np.sum(freq_mask)} → {kept} features (threshold={config.variance_threshold})"
+                )
+        else:
+            final_mask[:] = False
+    filtered_cols = [col for col, keep in zip(fp_cols, final_mask) if keep]
+    return filtered_cols, final_mask
+
+
+def normalize_descriptor_columns(df: pd.DataFrame, descriptor_cols: List[str],
+                                 logger: Optional[logging.Logger] = None) -> List[str]:
+    """Apply StandardScaler normalization to descriptor block before fusion."""
+    if not descriptor_cols:
+        return descriptor_cols
+    from sklearn.preprocessing import StandardScaler
+
+    descriptor_values = df[descriptor_cols].to_numpy(dtype=float)
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(descriptor_values)
+    df.loc[:, descriptor_cols] = scaled
+    if logger:
+        logger.info(f"Normalized {len(descriptor_cols)} descriptor columns with StandardScaler")
+    return descriptor_cols
 
 def filter_low_variance_features(df: pd.DataFrame, fp_cols: List[str], 
                                threshold: float = 0.01, logger: Optional[logging.Logger] = None) -> List[str]:
@@ -1032,6 +1136,9 @@ class ResidualMLP(nn.Module):
         projection_hidden_dim: int = 256,
         projection_dim: int = 128,
         enable_projection: bool = True,
+        descriptor_dim: int = 0,
+        descriptor_projection_enabled: bool = False,
+        descriptor_projection_type: str = "scale",
     ):
         super(ResidualMLP, self).__init__()
         if hidden_dims is None:
@@ -1055,14 +1162,39 @@ class ResidualMLP(nn.Module):
         if self.enable_projection:
             self.projection_head = ProjectionHead(final_dim, projection_hidden_dim, projection_dim)
             self.contrastive_mode = 'supcon'
+        self.descriptor_dim = max(int(descriptor_dim), 0)
+        self.descriptor_projection_enabled = bool(descriptor_projection_enabled) and self.descriptor_dim > 0
+        self.descriptor_projection_type = descriptor_projection_type.lower() if descriptor_projection_enabled else None
+        self.descriptor_projection_layer = None
+        self.descriptor_projection_scale = None
+        if self.descriptor_projection_enabled:
+            if self.descriptor_projection_type == "linear":
+                self.descriptor_projection_layer = nn.Linear(self.descriptor_dim, self.descriptor_dim, bias=False)
+            else:
+                self.descriptor_projection_scale = nn.Parameter(torch.ones(self.descriptor_dim))
+        self.descriptor_input_offset = max(input_dim - self.descriptor_dim, 0) if self.descriptor_dim > 0 else input_dim
 
     def forward(self, x: torch.Tensor, return_projection: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        x = self._apply_descriptor_projection(x)
         for block in self.blocks:
             x = block(x)
         logits = self.output_layer(x)
         if return_projection and self.enable_projection:
             return logits, self.projection_head(x)
         return logits
+
+    def _apply_descriptor_projection(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.descriptor_projection_enabled or self.descriptor_dim == 0:
+            return x
+        fp_part = x[:, :self.descriptor_input_offset] if self.descriptor_input_offset > 0 else None
+        desc_part = x[:, self.descriptor_input_offset:]
+        if self.descriptor_projection_type == "linear" and self.descriptor_projection_layer is not None:
+            desc_part = self.descriptor_projection_layer(desc_part)
+        elif self.descriptor_projection_scale is not None:
+            desc_part = desc_part * self.descriptor_projection_scale
+        if fp_part is None:
+            return desc_part
+        return torch.cat([fp_part, desc_part], dim=-1)
 
 # --------- GAT Model (Graph Attention Network) ---------
 try:
@@ -1149,6 +1281,11 @@ try:
                      dropout: float = 0.3,
                      freeze_gat: bool = False,
                      freeze_fp: bool = False,
+                     fusion_strategy: str = "concat",
+                     contrastive_alpha: Optional[float] = None,
+                     descriptor_dim: int = 0,
+                     descriptor_projection_enabled: bool = False,
+                     descriptor_projection_type: str = "scale",
                      projection_hidden_dim: int = 256,
                      projection_dim: int = 128):
             super(HybridGATFingerprintModel, self).__init__()
@@ -1162,9 +1299,30 @@ try:
                 dropout=dropout,
                 activation="mish",
                 use_residual=True,
-                norm_type="layernorm"
+                norm_type="layernorm",
+                descriptor_dim=descriptor_dim,
+                descriptor_projection_enabled=descriptor_projection_enabled,
+                descriptor_projection_type=descriptor_projection_type,
             )
-            fusion_input = self.gat_encoder.output_dim + fp_output_dim
+
+            self.fusion_strategy = fusion_strategy.lower() if fusion_strategy else "concat"
+            self.contrastive_alpha = contrastive_alpha
+            self.contrastive_mode = 'cross_modal'
+
+            self.graph_dim = self.gat_encoder.output_dim
+            self.attention_enabled = self.fusion_strategy == "attention"
+            self.attn_aux_projection = None
+            attention_output_dim = fp_output_dim
+            if self.attention_enabled:
+                self.attention_dim = self.graph_dim
+                attention_output_dim = self.attention_dim
+                if fp_output_dim != self.attention_dim:
+                    self.attn_aux_projection = nn.Linear(fp_output_dim, self.attention_dim, bias=False)
+                self.attn_scale = math.sqrt(self.attention_dim)
+            else:
+                self.attention_dim = fp_output_dim
+
+            fusion_input = self.graph_dim + attention_output_dim
             self.fusion_head = ResidualMLP(
                 input_dim=fusion_input,
                 hidden_dims=fusion_hidden_dims or [256],
@@ -1176,7 +1334,6 @@ try:
             )
             self.gat_projection_head = ProjectionHead(self.gat_encoder.output_dim, projection_hidden_dim, projection_dim)
             self.fp_projection_head = ProjectionHead(fp_output_dim, projection_hidden_dim, projection_dim)
-            self.contrastive_mode = 'cross_modal'
             if freeze_gat:
                 for param in self.gat_encoder.parameters():
                     param.requires_grad = False
@@ -1189,13 +1346,28 @@ try:
                 raise ValueError("HybridGATFingerprintModel requires fingerprint_features")
             graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
             fp_repr = self.fp_encoder(fingerprint_features)
-            fused = torch.cat([graph_repr, fp_repr], dim=-1)
+            fused = self._fuse_representations(graph_repr, fp_repr)
             logits = self.fusion_head(fused).squeeze(-1)
             if return_projection:
                 graph_proj = self.gat_projection_head(graph_repr)
                 fp_proj = self.fp_projection_head(fp_repr)
                 return logits, graph_proj, fp_proj
             return logits
+
+        def _fuse_representations(self, graph_repr: torch.Tensor, fp_repr: torch.Tensor) -> torch.Tensor:
+            if self.attention_enabled:
+                weighted_aux = self._apply_cross_attention(graph_repr, fp_repr)
+                return torch.cat([graph_repr, weighted_aux], dim=-1)
+            if self.fusion_strategy == "concat":
+                return torch.cat([graph_repr, fp_repr], dim=-1)
+            raise NotImplementedError(f"Fusion strategy '{self.fusion_strategy}' is not implemented for HybridGATFingerprintModel.")
+
+        def _apply_cross_attention(self, graph_repr: torch.Tensor, fp_repr: torch.Tensor) -> torch.Tensor:
+            key = self.attn_aux_projection(fp_repr) if self.attn_aux_projection is not None else fp_repr
+            scores = torch.matmul(graph_repr, key.transpose(0, 1)) / self.attn_scale
+            attention = torch.softmax(scores, dim=-1)
+            weighted_aux = torch.matmul(attention, key)
+            return weighted_aux
     
     GAT_AVAILABLE = True
 except ImportError:
@@ -1573,6 +1745,8 @@ try:
                      freeze_gat: bool = False,
                      freeze_bert: bool = False,
                      freeze_transformer_layers: int = 0,
+                     fusion_strategy: str = "concat",
+                     contrastive_alpha: Optional[float] = None,
                      bert_encoder: Optional['ChemBERTaEncoder'] = None,
                      projection_hidden_dim: int = 256,
                      projection_dim: int = 128):
@@ -1583,7 +1757,24 @@ try:
                 dropout=dropout,
                 freeze_transformer_layers=freeze_transformer_layers
             )
-            fusion_input = self.gat_encoder.output_dim + self.bert_encoder.hidden_size
+            self.fusion_strategy = fusion_strategy.lower() if fusion_strategy else "concat"
+            self.contrastive_alpha = contrastive_alpha
+            self.contrastive_mode = 'cross_modal'
+            self.graph_dim = self.gat_encoder.output_dim
+            bert_dim = self.bert_encoder.hidden_size
+            self.attention_enabled = self.fusion_strategy == "attention"
+            self.attn_aux_projection = None
+            attention_output_dim = bert_dim
+            if self.attention_enabled:
+                self.attention_dim = self.graph_dim
+                attention_output_dim = self.attention_dim
+                if bert_dim != self.attention_dim:
+                    self.attn_aux_projection = nn.Linear(bert_dim, self.attention_dim, bias=False)
+                self.attn_scale = math.sqrt(self.attention_dim)
+            else:
+                self.attention_dim = bert_dim
+
+            fusion_input = self.graph_dim + attention_output_dim
             self.fusion_head = ResidualMLP(
                 input_dim=fusion_input,
                 hidden_dims=fusion_hidden_dims or [256],
@@ -1595,7 +1786,6 @@ try:
             )
             self.gat_projection_head = ProjectionHead(self.gat_encoder.output_dim, projection_hidden_dim, projection_dim)
             self.bert_projection_head = ProjectionHead(self.bert_encoder.hidden_size, projection_hidden_dim, projection_dim)
-            self.contrastive_mode = 'cross_modal'
             if freeze_gat:
                 for param in self.gat_encoder.parameters():
                     param.requires_grad = False
@@ -1609,13 +1799,28 @@ try:
                 raise ValueError("HybridGATChemBERTaFusionModel requires ChemBERTa inputs")
             graph_repr = self.gat_encoder(x, edge_index, batch, edge_attr=edge_attr)
             bert_repr = self.bert_encoder(input_ids, attention_mask)
-            fused = torch.cat([graph_repr, bert_repr], dim=-1)
+            fused = self._fuse_representations(graph_repr, bert_repr)
             logits = self.fusion_head(fused).squeeze(-1)
             if return_projection:
                 graph_proj = self.gat_projection_head(graph_repr)
                 bert_proj = self.bert_projection_head(bert_repr)
                 return logits, graph_proj, bert_proj
             return logits
+
+        def _fuse_representations(self, graph_repr: torch.Tensor, bert_repr: torch.Tensor) -> torch.Tensor:
+            if self.attention_enabled:
+                weighted_aux = self._apply_cross_attention(graph_repr, bert_repr)
+                return torch.cat([graph_repr, weighted_aux], dim=-1)
+            if self.fusion_strategy == "concat":
+                return torch.cat([graph_repr, bert_repr], dim=-1)
+            raise NotImplementedError(f"Fusion strategy '{self.fusion_strategy}' is not implemented for HybridGATChemBERTaFusionModel.")
+
+        def _apply_cross_attention(self, graph_repr: torch.Tensor, bert_repr: torch.Tensor) -> torch.Tensor:
+            key = self.attn_aux_projection(bert_repr) if self.attn_aux_projection is not None else bert_repr
+            scores = torch.matmul(graph_repr, key.transpose(0, 1)) / self.attn_scale
+            attention = torch.softmax(scores, dim=-1)
+            weighted_aux = torch.matmul(attention, key)
+            return weighted_aux
     
     CHEMBERTA_AVAILABLE = True
 except ImportError:
@@ -1897,8 +2102,13 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
         Dictionary mapping model keys to model configurations
     """
     registry = {}
+    mlp_cfg = getattr(config, 'mlp_hyperparams', {}) or {}
     gat_cfg = getattr(config, 'gat_hyperparams', {}) or {}
     chemberta_cfg = getattr(config, 'chemberta_hyperparams', {}) or {}
+    hybrid_cfg = getattr(config, 'hybrid_model_params', {}) or {}
+    descriptor_dim = getattr(config, "descriptor_feature_dim", 0) if config is not None else 0
+    descriptor_projection_enabled = getattr(config, "descriptor_projection_enabled", True) if config is not None else False
+    descriptor_projection_type = getattr(config, "descriptor_projection_type", "scale") if config is not None else "scale"
     
     # ===== Traditional Models =====
     from sklearn.linear_model import LogisticRegression, Ridge
@@ -1998,18 +2208,26 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
     
     # MLP (Multi-Layer Perceptron)
     # Always add MLP to registry, but input_dim will be set dynamically in train_model_wrapper
+    mlp_hidden_dims = mlp_cfg.get('hidden_units', [512, 256])
+    mlp_dropout = mlp_cfg.get('dropout', 0.3)
+    mlp_activation = mlp_cfg.get('activation', 'mish')
+    mlp_use_residual = mlp_cfg.get('use_residual', True)
+    mlp_norm_type = 'batchnorm' if mlp_cfg.get('use_batch_norm') else 'layernorm'
     registry['MLP'] = {
         'type': 'pytorch',
         'modality': 'fingerprint',
         'model_class': ResidualMLP,
         'params': {
             'input_dim': input_dim if input_dim is not None else -1,  # Placeholder -1, will be updated dynamically
-            'hidden_dims': [512, 256],
-            'dropout': 0.3,
-            'activation': 'mish',
-            'use_residual': True,
+            'hidden_dims': mlp_hidden_dims,
+            'dropout': mlp_dropout,
+            'activation': mlp_activation,
+            'use_residual': mlp_use_residual,
             'output_dim': 1,
-            'norm_type': 'layernorm'
+            'norm_type': mlp_norm_type,
+            'descriptor_dim': descriptor_dim,
+            'descriptor_projection_enabled': descriptor_projection_enabled,
+            'descriptor_projection_type': descriptor_projection_type
         }
     }
     
@@ -2046,7 +2264,10 @@ def build_model_registry(task: str = "classification", input_dim: Optional[int] 
                 'fusion_hidden_dims': [256],
                 'dropout': gat_cfg.get('dropout', 0.3),
                 'freeze_gat': False,
-                'freeze_fp': False
+                'freeze_fp': False,
+                'descriptor_dim': descriptor_dim,
+                'descriptor_projection_enabled': descriptor_projection_enabled,
+                'descriptor_projection_type': descriptor_projection_type
             }
         }
         if CHEMBERTA_AVAILABLE:
@@ -2206,7 +2427,12 @@ def train_pytorch_model(model, train_loader, val_loader, config: QSARConfig,
         contrastive_mode in {"supcon", "cross_modal"} and
         getattr(config, "enable_supervised_contrastive", True)
     )
-    contrastive_alpha = min(max(getattr(config, "contrastive_alpha", 0.5), 0.0), 1.0)
+    base_contrastive_alpha = min(max(getattr(config, "contrastive_alpha", 0.5), 0.0), 1.0)
+    model_contrastive_alpha = getattr(model, "contrastive_alpha", None)
+    contrastive_alpha = (
+        min(max(model_contrastive_alpha, 0.0), 1.0)
+        if model_contrastive_alpha is not None else base_contrastive_alpha
+    )
     contrastive_temperature = getattr(config, "contrastive_temperature", 0.07)
     supcon_loss_fn = SupConLoss(contrastive_temperature) if contrastive_mode == "supcon" else None
 
@@ -2578,6 +2804,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
     threshold = get_classification_threshold(config)
     
     model_type = model_config.get('type', 'sklearn')
+    mlp_cfg = getattr(config, 'mlp_hyperparams', {}) or {}
+    hybrid_cfg = getattr(config, 'hybrid_model_params', {}) or {}
     
     # ===== Sklearn Models =====
     if model_type == 'sklearn':
@@ -2658,13 +2886,19 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
     # ===== PyTorch MLP =====
     elif model_type == 'pytorch':
         # Dynamically update input_dim based on actual feature dimensions
+        model_config = model_config.copy()
+        model_config['params'] = model_config.get('params', {}).copy()
         if X_train is not None:
             actual_input_dim = X_train.shape[1]
-            model_config = model_config.copy()  # Create a copy to avoid modifying original
-            model_config['params'] = model_config['params'].copy()
             model_config['params']['input_dim'] = actual_input_dim
             if logger:
                 logger.debug(f"MLP input_dim set to {actual_input_dim}")
+        descriptor_dim = getattr(config, 'descriptor_feature_dim', 0)
+        model_config['params']['descriptor_dim'] = descriptor_dim
+        model_config['params']['descriptor_projection_enabled'] = (
+            config.descriptor_projection_enabled and descriptor_dim > 0
+        )
+        model_config['params']['descriptor_projection_type'] = config.descriptor_projection_type
         
         model = model_config['model_class'](**model_config['params'])
         
@@ -2685,6 +2919,10 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
         
         # Train model with model_type="pytorch"
+        mlp_optimizer_hyperparams = {
+            'learning_rate': mlp_cfg.get('learning_rate', config.learning_rate),
+            'weight_decay': mlp_cfg.get('weight_decay', config.deep_learning_weight_decay)
+        }
         model = train_pytorch_model(
             model,
             train_loader,
@@ -2693,10 +2931,7 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             task,
             logger,
             model_type="pytorch",
-            optimizer_hyperparams={
-                'learning_rate': config.learning_rate,
-                'weight_decay': config.deep_learning_weight_decay
-            }
+            optimizer_hyperparams=mlp_optimizer_hyperparams
         )
         
         # Predictions
@@ -2809,6 +3044,11 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         fusion_params = dict(model_config['params'])
         fusion_params['gat_params'] = gat_params
         fusion_params['fingerprint_dim'] = fp_train.shape[1]
+        fusion_params['fusion_strategy'] = hybrid_cfg.get('fusion_strategy', 'concat')
+        fusion_params['contrastive_alpha'] = hybrid_cfg.get('contrastive_alpha', config.contrastive_alpha)
+        fusion_params.setdefault('descriptor_dim', getattr(config, 'descriptor_feature_dim', 0))
+        fusion_params.setdefault('descriptor_projection_enabled', config.descriptor_projection_enabled)
+        fusion_params.setdefault('descriptor_projection_type', config.descriptor_projection_type)
 
         model = model_config['model_class'](**fusion_params)
 
@@ -2830,8 +3070,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             y_val_filtered = y_val[val_dataset.valid_indices]
 
         hybrid_optimizer_hyperparams = {
-            'learning_rate': config.gat_hyperparams.get('learning_rate', config.learning_rate),
-            'weight_decay': config.gat_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+            'learning_rate': hybrid_cfg.get('learning_rate', config.gat_hyperparams.get('learning_rate', config.learning_rate)),
+            'weight_decay': hybrid_cfg.get('weight_decay', config.gat_hyperparams.get('weight_decay', config.deep_learning_weight_decay))
         }
         model = train_pytorch_model(
             model,
@@ -2888,6 +3128,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
         fusion_params['gat_params'] = gat_params
         fusion_params['bert_model_name'] = bert_model_name
         fusion_params['bert_encoder'] = shared_bert_encoder
+        fusion_params['fusion_strategy'] = hybrid_cfg.get('fusion_strategy', 'concat')
+        fusion_params['contrastive_alpha'] = hybrid_cfg.get('contrastive_alpha', config.contrastive_alpha)
 
         model = model_config['model_class'](**fusion_params)
 
@@ -2906,8 +3148,8 @@ def train_model_wrapper(model_key: str, model_config: Dict[str, Any], X_train, y
             y_val_filtered = y_val[val_dataset.valid_indices]
 
         hybrid_bert_optimizer_hyperparams = {
-            'learning_rate': config.chemberta_hyperparams.get('learning_rate', config.learning_rate),
-            'weight_decay': config.chemberta_hyperparams.get('weight_decay', config.deep_learning_weight_decay)
+            'learning_rate': hybrid_cfg.get('learning_rate', config.chemberta_hyperparams.get('learning_rate', config.learning_rate)),
+            'weight_decay': hybrid_cfg.get('weight_decay', config.chemberta_hyperparams.get('weight_decay', config.deep_learning_weight_decay))
         }
         model = train_pytorch_model(
             model,
@@ -4014,8 +4256,13 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         'external_summary': None,
         'cv_summary': None,
         'external_rows': None,
-        'cv_rows': None
+        'cv_rows': None,
+        'feature_stats': None,
+        'summary_results': None,
+        'model_params': None
     }
+
+    feature_stats = {'total_features': 0, 'filtered_features': 0}
 
     # Setup output directory (already created in main_cli)
     out_dir = Path(config.output_dir)
@@ -4038,6 +4285,8 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
     # Build model registry
     input_dim = X.shape[1] if X is not None else None
     registry = build_model_registry(task=config.task, input_dim=input_dim, config=config)
+    registry_snapshot = {model_key: copy.deepcopy(model_cfg.get('params', {}))
+                         for model_key, model_cfg in registry.items()}
     
     logger.info(f"\nAvailable models: {list(registry.keys())}")
     logger.info(f"Selected models: {config.selected_models}")
@@ -4154,6 +4403,12 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
             dev_feature_names_filtered = None
             if X_ext_test is not None:
                 X_ext_test_filtered = X_ext_test
+        dev_total_features = X_dev.shape[1] if X_dev is not None else 0
+        dev_filtered_features = X_dev_filtered.shape[1] if X_dev_filtered is not None else dev_total_features
+        feature_stats = {
+            'total_features': int(dev_total_features),
+            'filtered_features': int(dev_filtered_features)
+        }
 
         if getattr(config, "save_train_features", False):
             train_dir = out_dir / "data"
@@ -5049,6 +5304,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         logger.info(f"{'='*60}")
         logger.info("Single Split Mode")
         logger.info(f"{'='*60}")
+        feature_stats = {
+            'total_features': X.shape[1] if X is not None else 0,
+            'filtered_features': X.shape[1] if X is not None else 0
+        }
         
         # Scaffold-based split using SMILES
         if config.split_method == "scaffold":
@@ -5227,7 +5486,10 @@ def main_pipeline(config: QSARConfig, X: np.ndarray, y: np.ndarray,
         else:
             logger.info("\nNote: Model saving and SHAP analysis are only available in single split mode (--folds 1)")
             logger.info("Use --save-cv-details to persist per-fold/seed artifacts for post-hoc SHAP analysis.")
-    
+
+    result_payload['feature_stats'] = feature_stats
+    result_payload['summary_results'] = summary_results
+    result_payload['model_params'] = registry_snapshot
     return result_payload
 
 # --------- Automatic Fingerprint Generation ---------
@@ -5349,8 +5611,96 @@ def generate_fingerprints_from_csv(df: pd.DataFrame, smiles_column: str,
     return df_with_fp
 
 
+def compute_rdkit_physchem_descriptors(df: pd.DataFrame, smiles_column: str,
+                                       descriptor_names: List[str],
+                                       logger: logging.Logger = None) -> pd.DataFrame:
+    """
+    Compute RDKit physicochemical descriptors for each molecule.
+
+    Args:
+        df: Input DataFrame containing SMILES strings.
+        smiles_column: Name of the column with SMILES.
+        descriptor_names: List of descriptor names from rdkit.Chem.Descriptors.
+        logger: Optional logger for diagnostics.
+
+    Returns:
+        DataFrame with descriptor columns (same length as input df).
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
+    except ImportError as exc:
+        if logger:
+            logger.error(f"RDKit is required for descriptor computation: {exc}")
+        raise
+
+    descriptor_funcs = {}
+    missing = []
+    for name in descriptor_names:
+        if hasattr(Descriptors, name):
+            descriptor_funcs[name] = getattr(Descriptors, name)
+        else:
+            missing.append(name)
+
+    if missing:
+        raise ValueError(f"Descriptors not available in RDKit: {missing}")
+
+    rows = {name: [] for name in descriptor_names}
+
+    smiles_series = df[smiles_column].astype(str).fillna("").tolist()
+    for smiles in smiles_series:
+        if not smiles.strip():
+            for name in descriptor_names:
+                rows[name].append(float("nan"))
+            continue
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            for name in descriptor_names:
+                rows[name].append(float("nan"))
+            continue
+        for name, func in descriptor_funcs.items():
+            try:
+                rows[name].append(float(func(mol)))
+            except Exception:
+                rows[name].append(float("nan"))
+
+    descriptor_df = pd.DataFrame(rows)
+    if logger:
+        logger.info(f"Computed {len(descriptor_names)} RDKit descriptors for {len(df)} molecules")
+    return descriptor_df
+
+
+def save_dataframe_with_descriptors(df: pd.DataFrame, config: QSARConfig, descriptor_cols: List[str],
+                                    fp_cols: List[str], run_output_dir: Path, logger: logging.Logger = None):
+    """
+    Save a CSV combining descriptors, fingerprints, and essential columns for reproducibility.
+    """
+    export_cols = [config.id_column, config.smiles_column]
+    if config.task == "classification":
+        export_cols.append(config.label_column)
+    else:
+        export_cols.append(config.pic50_column)
+    export_cols.extend(descriptor_cols)
+    export_cols.extend(fp_cols)
+    # Keep only columns that actually exist and maintain order without duplicates
+    seen = set()
+    ordered_cols = []
+    for col in export_cols:
+        if col not in df.columns or col in seen:
+            continue
+        seen.add(col)
+        ordered_cols.append(col)
+
+    data_dir = run_output_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    out_path = data_dir / "data_with_descriptors.csv"
+    df[ordered_cols].to_csv(out_path, index=False)
+    if logger:
+        logger.info(f"Saved merged descriptors+fingerprints data to: {out_path}")
+
+
 def compute_morgan_fingerprints(smiles_list: List[str], radius: int = 2, n_bits: int = 2048,
-                                logger: Optional[logging.Logger] = None) -> np.ndarray:
+                                 logger: Optional[logging.Logger] = None) -> np.ndarray:
     """
     Compute Morgan fingerprints (bit vectors) for a list of SMILES strings.
     """
@@ -5563,6 +5913,14 @@ External Test Set Evaluation:
                        help='Disable automatic fingerprint generation')
     parser.add_argument('--fp-types', default='morgan', 
                        help='Fingerprint types to generate (comma-separated): morgan,maccs,rdkit,atompair,torsion')
+    parser.add_argument('--use-rdkit-descriptors', action='store_true',
+                       help='Compute RDKit physicochemical descriptors and append them to fingerprint features')
+    parser.add_argument('--rdkit-descriptors',
+                       help='Comma-separated list of RDKit descriptor names to compute (defaults to the built-in list)')
+    parser.add_argument('--no-descriptor-projection', action='store_true',
+                       help='Skip the learnable descriptor projection/scale layer before the classifier')
+    parser.add_argument('--descriptor-projection-type', choices=['scale', 'linear'],
+                       help='Projection type applied to descriptor block ("scale" for per-dim scale, "linear" for diag linear layer)')
     parser.add_argument('--no-shap', action='store_true', help='Disable SHAP analysis')
     parser.add_argument('--skip-cv-stage2', action='store_true',
                        help='Skip Stage 2 K-Fold CV on Development Set (Dev/External split + Stage 3 still run)')
@@ -5643,7 +6001,17 @@ External Test Set Evaluation:
                 for value in args.deep_class_weights.split(',')
                 if value.strip()
             ]
-        
+        if args.use_rdkit_descriptors:
+            config.use_rdkit_physchem_descriptors = True
+        if args.rdkit_descriptors:
+            parsed = [name.strip() for name in args.rdkit_descriptors.split(',') if name.strip()]
+            if parsed:
+                config.rdkit_descriptor_names = parsed
+        if args.no_descriptor_projection:
+            config.descriptor_projection_enabled = False
+        if args.descriptor_projection_type:
+            config.descriptor_projection_type = args.descriptor_projection_type
+
         config.config_file = str(args.config)
     
     else:
@@ -5697,6 +6065,16 @@ External Test Set Evaluation:
                 if value.strip()
             ] if args.deep_class_weights else []
         )
+        if args.use_rdkit_descriptors:
+            config.use_rdkit_physchem_descriptors = True
+        if args.rdkit_descriptors:
+            parsed = [name.strip() for name in args.rdkit_descriptors.split(',') if name.strip()]
+            if parsed:
+                config.rdkit_descriptor_names = parsed
+        if args.no_descriptor_projection:
+            config.descriptor_projection_enabled = False
+        if args.descriptor_projection_type:
+            config.descriptor_projection_type = args.descriptor_projection_type
         if args.tune_stage2:
             config.tune = True
             config.tune_mode = args.tune_mode
@@ -5741,14 +6119,31 @@ External Test Set Evaluation:
     
     # Check library versions
     check_library_versions(logger)
+
+    run_start_time = datetime.utcnow()
+    try:
+        import rdkit
+        from rdkit import Chem
+        rdkit_version = Chem.rdBase.rdkitVersion
+    except ImportError:
+        rdkit_version = "not installed"
+    hardware_info = {
+        'torch_version': torch.__version__,
+        'rdkit_version': rdkit_version,
+        'cuda_available': torch.cuda.is_available()
+    }
     
     # Load data
     logger.info(f"Loading data from: {config.input_path}")
     df = read_table(Path(config.input_path))
     logger.info(f"Loaded {df.shape[0]} rows, {df.shape[1]} columns")
+    X = None
+    y = None
+    data_rows = df.shape[0]
     
     # Validate SMILES strings
     smiles_list = df[config.smiles_column].tolist()
+    ids = df[config.id_column].tolist()
     validity_list, invalid_indices = validate_smiles(smiles_list, logger)
     n_invalid = len(invalid_indices)
     
@@ -5765,9 +6160,6 @@ External Test Set Evaluation:
         # Filter out invalid SMILES and corresponding data for ALL models
         valid_mask = np.array(validity_list)
         df = df.loc[valid_mask].reset_index(drop=True)
-        if X is not None:
-            X = X[valid_mask]
-        y = y[valid_mask]
         smiles_list = [smiles_list[i] for i, valid in enumerate(validity_list) if valid]
         ids = [ids[i] for i, valid in enumerate(validity_list) if valid]
         logger.info(f"Filtered out {n_invalid} invalid SMILES samples. Remaining samples: {len(df)}")
@@ -5787,41 +6179,67 @@ External Test Set Evaluation:
         logger.info(f"Available columns: {list(df.columns)}")
         sys.exit(1)
     
+    descriptor_cols: List[str] = []
+    descriptor_names = config.rdkit_descriptor_names or []
+    if config.use_rdkit_physchem_descriptors and descriptor_names:
+        missing_descriptors = [name for name in descriptor_names if name not in df.columns]
+        if descriptor_names and not missing_descriptors:
+            descriptor_cols = descriptor_names
+            config.descriptor_feature_names = descriptor_cols
+            config.descriptor_feature_dim = len(descriptor_cols)
+            logger.info("All requested RDKit descriptors already present; skipping recomputation.")
+        else:
+            logger.info("Computing RDKit physicochemical descriptors")
+            try:
+                compute_list = missing_descriptors or descriptor_names
+                descriptor_df = compute_rdkit_physchem_descriptors(
+                    df,
+                    config.smiles_column,
+                    compute_list,
+                    logger=logger
+                )
+                df = pd.concat([df, descriptor_df], axis=1)
+                descriptor_cols = [name for name in descriptor_names if name in df.columns]
+                config.descriptor_feature_names = descriptor_cols
+                config.descriptor_feature_dim = len(descriptor_cols)
+                logger.info(f"Appended descriptor columns: {descriptor_cols}")
+            except Exception as exc:
+                logger.error(f"Failed to compute RDKit descriptors: {exc}")
+                sys.exit(1)
+    else:
+        config.descriptor_feature_names = []
+        config.descriptor_feature_dim = 0
+
     # Select fingerprint columns (optional for GAT/ChemBERTa, required for traditional models/MLP)
     fp_cols = select_fp_columns(df)
-    
+    filtered_cols: List[str] = []
+    filtered_fp_cols: List[str] = []
+
     if not fp_cols:
         logger.warning("No fingerprint columns detected!")
-        
-        # Check if selected models require fingerprints
+
         requires_fingerprints = check_models_require_fingerprints(config.selected_models)
-        
+
         if requires_fingerprints:
             logger.info("Selected models require fingerprints. Generating fingerprints automatically...")
             logger.info(f"Using {', '.join(config.fingerprint_types)} fingerprints")
-            
+
             try:
                 df = generate_fingerprints_from_csv(
-                    df, 
-                    config.smiles_column, 
+                    df,
+                    config.smiles_column,
                     fingerprint_types=config.fingerprint_types,
                     logger=logger
                 )
-                
-                # Save DataFrame with fingerprints to a new file
+
                 input_path = Path(config.input_path)
                 output_with_fp_path = input_path.parent / f"{input_path.stem}_with_fingerprints{input_path.suffix}"
                 df.to_csv(output_with_fp_path, index=False)
                 logger.info(f"Data with fingerprints saved to: {output_with_fp_path}")
-                
-                # Re-select fingerprint columns
+
                 fp_cols = select_fp_columns(df)
                 logger.info(f"Generated {len(fp_cols)} fingerprint columns")
-                
-                # Prepare features from generated fingerprints
-                filtered_cols = fp_cols
-                X = df[filtered_cols].to_numpy(dtype=float)
-                
+                filtered_fp_cols, _ = filter_fingerprint_features(df[fp_cols], config, logger)
             except Exception as e:
                 logger.error(f"Failed to generate fingerprints: {e}")
                 logger.info("Please install RDKit: pip install rdkit")
@@ -5831,18 +6249,24 @@ External Test Set Evaluation:
             logger.info("GAT and ChemBERTa models can still be trained using SMILES only.")
             logger.info("Traditional models (LR, RFC, XGBC, etc.) and MLP require fingerprints.")
             logger.info("Use generate_fingerprints.py to add fingerprint features if needed.")
-            
-            # Set X to None if no fingerprints
-            X = None
-            filtered_cols = []
     else:
         logger.info(f"Detected {len(fp_cols)} fingerprint columns")
-        logger.info(f"Feature filtering and standardization will be performed within each fold to prevent data leakage")
-        
-        # Prepare features (no filtering here, will be done in each fold)
-        filtered_cols = fp_cols
+        logger.info("Feature filtering and standardization will be performed within each fold to prevent data leakage")
+        filtered_fp_cols, _ = filter_fingerprint_features(df[fp_cols], config, logger)
+
+    if descriptor_cols:
+        normalize_descriptor_columns(df, descriptor_cols, logger)
+    save_dataframe_with_descriptors(df, config, descriptor_cols, fp_cols, run_output_dir, logger)
+    if descriptor_cols:
+        filtered_cols = filtered_fp_cols + descriptor_cols
+    else:
+        filtered_cols = filtered_fp_cols
+
+    if filtered_cols:
         X = df[filtered_cols].to_numpy(dtype=float)
-    
+    else:
+        X = None
+
     # Prepare labels based on task
     if config.task == "classification":
         y_series = pd.Series(df[config.label_column]).astype(str).str.strip().str.lower()
@@ -5913,6 +6337,9 @@ External Test Set Evaluation:
     split_cv_summary_frames = []
     split_ext_row_frames = []
     split_cv_row_frames = []
+    feature_stats_records = []
+    summary_results_records = []
+    model_params_snapshot = None
 
     for split_seed in split_seeds:
         split_dir = run_output_dir / f"split_seed_{split_seed}"
@@ -5927,6 +6354,14 @@ External Test Set Evaluation:
         )
         if not summary_dict:
             continue
+        summary_results_list = summary_dict.get('summary_results')
+        if summary_results_list:
+            summary_results_records.extend(summary_results_list)
+        feature_stats_entry = summary_dict.get('feature_stats')
+        if feature_stats_entry:
+            feature_stats_records.append(feature_stats_entry)
+        if model_params_snapshot is None and summary_dict.get('model_params'):
+            model_params_snapshot = copy.deepcopy(summary_dict['model_params'])
 
         ext_summary = summary_dict.get('external_summary')
         if ext_summary is not None and not ext_summary.empty:
@@ -5998,6 +6433,136 @@ External Test Set Evaluation:
         logger.info("\nCombined split summaries saved to:")
         for msg in summary_messages:
             logger.info(msg)
+
+    run_end_time = datetime.utcnow()
+    feature_stats_summary = feature_stats_records[0] if feature_stats_records else {'total_features': 0, 'filtered_features': 0}
+    write_experiment_summary(
+        run_dir=run_output_dir,
+        start_time=run_start_time,
+        end_time=run_end_time,
+        input_path=config.input_path,
+        data_rows=data_rows,
+        split_seeds=split_seeds,
+        hardware_info=hardware_info,
+        config=config,
+        external_metric=config.external_test_metric,
+        summary_frames=split_ext_summary_frames,
+        summary_results=summary_results_records,
+        model_params=model_params_snapshot or {},
+        feature_stats=feature_stats_summary
+    )
+
+
+def _format_hyperparameters(params: Dict[str, Any]) -> str:
+    if not params:
+        return "    None"
+    try:
+        text = json.dumps(params, indent=2, default=str)
+        return "\n".join(f"    {line}" for line in text.splitlines())
+    except Exception:
+        return "    " + str(params)
+
+
+def _aggregate_external_summary(summary_frames: List[pd.DataFrame],
+                                summary_results: List[Dict[str, Any]]) -> Optional[pd.DataFrame]:
+    df: Optional[pd.DataFrame] = None
+    if summary_frames:
+        df = pd.concat(summary_frames, ignore_index=True, sort=False)
+    elif summary_results:
+        df = pd.DataFrame(summary_results)
+    else:
+        return None
+
+    if df.empty or 'model' not in df.columns:
+        return None
+
+    numeric_df = df.select_dtypes(include=[np.number])
+    if numeric_df.empty:
+        return None
+
+    grouped = numeric_df.groupby(df['model']).mean()
+    grouped.reset_index(inplace=True)
+    meta_cols = ['model_type', 'modality']
+    meta = df[['model'] + [col for col in meta_cols if col in df.columns]].drop_duplicates('model')
+    aggregated = pd.merge(grouped, meta, on='model', how='left')
+    return aggregated
+
+
+def write_experiment_summary(run_dir: Path,
+                             start_time: datetime,
+                             end_time: datetime,
+                             input_path: str,
+                             data_rows: int,
+                             split_seeds: List[int],
+                             hardware_info: Dict[str, Any],
+                             config: QSARConfig,
+                             external_metric: str,
+                             summary_frames: List[pd.DataFrame],
+                             summary_results: List[Dict[str, Any]],
+                             model_params: Dict[str, Any],
+                             feature_stats: Dict[str, int]):
+    summary_path = run_dir / "experiment_summary.txt"
+    duration = end_time - start_time
+    aggregated = _aggregate_external_summary(summary_frames, summary_results)
+    lower_better_metrics = {'RMSE', 'MAE'}
+    metric_col = f"{external_metric}_mean"
+    if aggregated is not None and metric_col not in aggregated.columns:
+        candidates = [col for col in aggregated.columns if col.lower().startswith(external_metric.lower()) and col.endswith('_mean')]
+        metric_col = candidates[0] if candidates else aggregated.columns[1] if len(aggregated.columns) > 1 else aggregated.columns[0]
+
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write("Project Metadata\n")
+        f.write("------------------------------\n")
+        f.write(f"Run ID: {run_dir.name}\n")
+        f.write(f"Run started: {start_time.isoformat()}\n")
+        f.write(f"Run ended:   {end_time.isoformat()}\n")
+        f.write(f"Duration:    {str(duration)}\n")
+        f.write(f"Input file:  {input_path}\n")
+        f.write(f"Data rows:   {data_rows}\n")
+        f.write(f"Scaffold split seeds: {split_seeds}\n\n")
+
+        f.write("Hardware & Environment\n")
+        f.write("------------------------------\n")
+        f.write(f"PyTorch version: {hardware_info.get('torch_version', 'unknown')}\n")
+        f.write(f"RDKit version:   {hardware_info.get('rdkit_version', 'unknown')}\n")
+        f.write(f"CUDA available:  {'Yes' if hardware_info.get('cuda_available') else 'No'}\n\n")
+
+        f.write("Core Configuration\n")
+        f.write("------------------------------\n")
+        descriptor_list = config.rdkit_descriptor_names or []
+        f.write(f"Descriptors ({len(descriptor_list)}): {', '.join(descriptor_list)}\n")
+        f.write(f"Fingerprint types: {', '.join(config.fingerprint_types)}\n")
+        f.write(f"Contrastive alpha (global): {config.contrastive_alpha}\n")
+        fusion_strategy = config.hybrid_model_params.get('fusion_strategy', 'concat') if config.hybrid_model_params else 'concat'
+        hybrid_alpha = config.hybrid_model_params.get('contrastive_alpha', config.contrastive_alpha) if config.hybrid_model_params else config.contrastive_alpha
+        f.write(f"Hybrid contrastive alpha: {hybrid_alpha}\n")
+        f.write(f"Fusion strategy: {fusion_strategy}\n\n")
+
+        f.write("Model Performance Leaderboard (Top 3)\n")
+        f.write("------------------------------\n")
+        if aggregated is None or aggregated.empty:
+            f.write("No external test summaries were collected; leaderboard unavailable.\n\n")
+        else:
+            ascend = external_metric in lower_better_metrics
+            aggregated.sort_values(by=metric_col, ascending=ascend, inplace=True)
+            top_rows = aggregated.head(3)
+            for rank, (_, row) in enumerate(top_rows.iterrows(), 1):
+                metric_value = row.get(metric_col, float('nan'))
+                auc_value = row.get('AUC_mean', float('nan'))
+                mcc_value = row.get('MCC_mean', float('nan'))
+                f.write(f"{rank}. {row['model']}\n")
+                f.write(f"   {external_metric}: {metric_value:.4f}\n")
+                f.write(f"   AUC: {auc_value:.4f}, MCC: {mcc_value:.4f}\n")
+                params = model_params.get(row['model']) or {}
+                f.write("   Hyperparameters:\n")
+                f.write(f"{_format_hyperparameters(params)}\n")
+            f.write("\n")
+
+        f.write("Feature Statistics\n")
+        f.write("------------------------------\n")
+        total_feat = feature_stats.get('total_features', 0)
+        filtered_feat = feature_stats.get('filtered_features', 0)
+        f.write(f"Features after global filtering: {total_feat} -> {filtered_feat}\n")
 
 if __name__ == "__main__":
     main_cli()
