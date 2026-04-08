@@ -82,7 +82,7 @@ PLOT_CONFIG = {
     "tick_color": "#4c4c4c",
     "hist_color": "#003366",
     "hist_edgecolor": "black",
-    "hist_edgewidth": 0.5,
+    "hist_edgewidth": 0.3,
     "hist_bins": 22,
     "hist_alpha": 1.0,
     "scatter_color": "#9467bd",
@@ -90,6 +90,7 @@ PLOT_CONFIG = {
     "scatter_line_color": "#2c2c2c",
     "scatter_line_width": 1.25,
     "scatter_line_style": "-",
+    "actual_line_color": "#d62728",
     "placeholder_color": "#737373",
     "dpi": 300,
 }
@@ -351,8 +352,13 @@ def _permutation_attempt_limit(n_permutations: int) -> int:
     return max(10, n_permutations * 4)
 
 
-def _plot_histogram(values: List[float], actual: float, path: Path, title: str, xlabel: str,
-                    xlim: Optional[Tuple[float, float]] = None) -> None:
+def _plot_histogram(values: List[float],
+                    actual: float,
+                    path: Path,
+                    title: str,
+                    xlabel: str,
+                    xlim: Optional[Tuple[float, float]] = None,
+                    stat_annotations: Optional[Dict[str, float]] = None) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
     _style_axis(ax)
     bins = np.linspace(0.0, 1.0, 50)
@@ -368,7 +374,7 @@ def _plot_histogram(values: List[float], actual: float, path: Path, title: str, 
     )
     ax.axvline(
         actual,
-        color=PLOT_CONFIG["scatter_line_color"],
+        color=PLOT_CONFIG["actual_line_color"],
         linewidth=2,
         linestyle=PLOT_CONFIG["scatter_line_style"],
         label="Actual",
@@ -383,23 +389,44 @@ def _plot_histogram(values: List[float], actual: float, path: Path, title: str, 
     ax.legend()
     if xlim is not None:
         ax.set_xlim(xlim)
-    ax.set_xlim(0.0, 1.0)
+    else:
+        ax.set_xlim(0.0, 1.0)
     if counts.size > 0:
         ax.set_ylim(0, max(1.0, np.nanmax(counts)) * 1.1)
-    stats = np.asarray(values, dtype=float)
-    median = float(np.nanmedian(stats)) if stats.size else float("nan")
-    mean = float(np.nanmean(stats)) if stats.size else float("nan")
+    value_arr = np.asarray(values, dtype=float)
+    median = float(np.nanmedian(value_arr)) if value_arr.size else float("nan")
+    mean = float(np.nanmean(value_arr)) if value_arr.size else float("nan")
+    lines = [
+        f"Permutation Mean: {mean:.3f}",
+        f"Permutation Median: {median:.3f}",
+    ]
+    annotations = stat_annotations.copy() if stat_annotations else {}
+    z_val = annotations.get("z_score")
+    if z_val is not None and not math.isnan(z_val):
+        lines.append(f"Z-score: {z_val:.3f}")
+    p_val = annotations.get("p_value")
+    if p_val is not None and not math.isnan(p_val):
+        if p_val < 0.001:
+            lines.append("P-value: < 0.001")
+        else:
+            lines.append(f"P-value: {p_val:.3f}")
     ax.text(
         0.04,
         0.95,
-        f"perm mean {mean:.3f}\nperm median {median:.3f}",
+        "\n".join(lines),
         ha="left",
         va="top",
         transform=ax.transAxes,
-        fontsize=PLOT_CONFIG["label_fontsize"] - 1,
+        fontsize=10,
         fontweight="bold",
         color=PLOT_CONFIG["tick_color"],
-        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.4", alpha=0.0),
+        bbox=dict(
+            facecolor="white",
+            edgecolor="#e0e0e0",
+            boxstyle="round,pad=0.4",
+            alpha=0.7,
+            linewidth=0.8,
+        ),
         zorder=5,
     )
     _save_plot(fig, path)
@@ -919,8 +946,15 @@ def main():
 
     hist_xlim = (0.0, 1.0) if task == "classification" else None
     scatter_ylim = (0.0, 1.0) if task == "classification" else None
-    _plot_histogram(valid_rand.tolist(), actual_metric, output_dir / "permutation_histogram",
-                    "Y-scrambling performance", "Metric", xlim=hist_xlim)
+    _plot_histogram(
+        valid_rand.tolist(),
+        actual_metric,
+        output_dir / "permutation_histogram",
+        "Y-scrambling performance",
+        "Metric",
+        xlim=hist_xlim,
+        stat_annotations={"z_score": z_score, "p_value": p_value},
+    )
     _plot_scatter(correlations, rand_metrics, output_dir / "permutation_scatter",
                   "Correlation r^2 between Y and Y_rand", "Performance",
                   xlim=(-1.0, 1.0), ylim=scatter_ylim)
