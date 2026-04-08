@@ -15,18 +15,18 @@ The script requires numpy-friendly NPZ files that include `features` and `labels
 from pathlib import Path
 
 BASE_CONFIG = {
-    "project_root": Path("models_out/classification_20260330_212716"),
-    "model_key": "RFC",
+    "project_root": Path("models_out/classification_20260408_131840"),
+    "model_key": "ETC",
     "seed": 42,
-    "train_data": Path("models_out/classification_20260330_212716/split_seed_30/data/train_features.npz"),
-    "external_data": Path("models_out/classification_20260330_212716/split_seed_30/data/splits/external_test.npz"),
-    "predictions": Path("models_out/classification_20260330_212716/split_seed_30/predictions/external_test_predictions.csv"),
+    "train_data": Path("models_out/classification_20260408_131840/split_seed_3/data/train_features.npz"),
+    "external_data": Path("models_out/classification_20260408_131840/split_seed_3/data/splits/external_test.npz"),
+    "predictions": Path("models_out/classification_20260408_131840/split_seed_3/predictions/external_test_predictions.csv"),
     "som_rows": 8,
     "som_cols": 8,
     "som_iterations": 1000,
     "tanimoto_threshold": 0.5,
     "binary_threshold": 0.5,
-    "output_dir": Path("models_out/classification_20260330_212716/validation/RFC/seed_42"),
+    "output_dir": Path("models_out/classification_20260408_131840/split_seed_3/validation/ETC/seed_42"),
     "skip_som": False,
 }
 

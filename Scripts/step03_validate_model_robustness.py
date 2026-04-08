@@ -3,10 +3,10 @@
 
 Usage:
     python Scripts/step03_validate_model_robustness.py \
-        -p models_out/classification_20260401_233714/split_seed_4 \
+        -p models_out/classification_20260408_131840/split_seed_3 \
         -m Hybrid_GAT_FP \
         -s 42 \
-        --data models_out/classification_20260401_233714/split_seed_4/data/splits/external_test.npz \
+        --data models_out/classification_20260408_131840/split_seed_3/data/splits/external_test.npz \
         --n-permutations 1 \
         --task classification
 
@@ -14,16 +14,16 @@ By default the script uses the metadata saved alongside the model to apply the s
 It currently supports sklearn models and the PyTorch MLP (ResidualMLP).
 """
 
+# %%
 import json
 import logging
 import math
+import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
@@ -62,14 +62,140 @@ from Scripts.step01_train_qsar_models import (
     QSARConfig,
 )
 
+# %%
+# Change `font_family` here (e.g., "Times New Roman", "Cambria") for publication-ready labels.
+PLOT_CONFIG = {
+    "default_backend": "Agg",
+    "interactive_backend": "Qt5Agg",
+    "use_interactive": True,
+    "display_plots": True,
+    "font_family": "Cambria", # "Times New Roman" , "Cambria"
+    "font_size": 11,
+    "title_fontsize": 14,
+    "label_fontsize": 12,
+    "legend_fontsize": 10,
+    "title_fontweight": "semibold",
+    "label_fontweight": "normal",
+    "line_width": 2.0,
+    "grid_alpha": 0.15,
+    "grid_color": "#d9d9d9",
+    "tick_color": "#4c4c4c",
+    "hist_color": "#003366",
+    "hist_edgecolor": "black",
+    "hist_edgewidth": 0.5,
+    "hist_bins": 22,
+    "hist_alpha": 1.0,
+    "scatter_color": "#9467bd",
+    "scatter_alpha": 0.72,
+    "scatter_line_color": "#2c2c2c",
+    "scatter_line_width": 1.25,
+    "scatter_line_style": "-",
+    "placeholder_color": "#737373",
+    "dpi": 300,
+}
+
+def _has_display() -> bool:
+    return bool(
+        os.environ.get("DISPLAY")
+        or os.environ.get("WAYLAND_DISPLAY")
+        or os.environ.get("MIR_SOCKET")
+    )
+
+backend_override = os.environ.get("MATPLOTLIB_BACKEND")
+if backend_override:
+    _backend = backend_override
+elif PLOT_CONFIG["use_interactive"] and _has_display():
+    _backend = PLOT_CONFIG["interactive_backend"]
+else:
+    _backend = PLOT_CONFIG["default_backend"]
+
+try:
+    matplotlib.use(_backend)
+except Exception as exc:  # pragma: no cover - environment dependent
+    logging.getLogger(__name__).warning(
+        "Unable to switch matplotlib backend to %s (%s); falling back to Agg.",
+        _backend,
+        exc,
+    )
+    matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+
+if PLOT_CONFIG["use_interactive"] and not matplotlib.get_backend().lower().startswith("agg"):
+    plt.ion()
+
+# %%
+def _configure_rcparams() -> None:
+    rcParams.update({
+        "font.family": "serif",
+        "font.serif": [PLOT_CONFIG["font_family"]],
+        "font.size": PLOT_CONFIG["font_size"],
+        "axes.titlesize": PLOT_CONFIG["title_fontsize"],
+        "axes.labelsize": PLOT_CONFIG["label_fontsize"],
+        "legend.fontsize": PLOT_CONFIG["legend_fontsize"],
+        "axes.titleweight": PLOT_CONFIG["title_fontweight"],
+        "axes.labelweight": PLOT_CONFIG["label_fontweight"],
+        "axes.linewidth": PLOT_CONFIG["line_width"],
+        "axes.edgecolor": "#333333",
+        "axes.grid": True,
+        "grid.alpha": PLOT_CONFIG["grid_alpha"],
+        "grid.color": PLOT_CONFIG["grid_color"],
+        "grid.linestyle": "-",
+        "savefig.dpi": PLOT_CONFIG["dpi"],
+        "figure.dpi": PLOT_CONFIG["dpi"],
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+    })
+    rcParams["axes.spines.right"] = False
+    rcParams["axes.spines.top"] = False
+
+
+def _style_axis(ax: plt.Axes) -> None:
+    ax.set_facecolor("white")
+    ax.grid(True, alpha=PLOT_CONFIG["grid_alpha"], color=PLOT_CONFIG["grid_color"], linewidth=0.9)
+    ax.set_axisbelow(True)
+    for spine in ax.spines.values():
+        spine.set_color("#333333")
+        spine.set_linewidth(1.5)
+        spine.set_visible(True)
+    ax.tick_params(colors=PLOT_CONFIG["tick_color"], which="both")
+
+
+def _maybe_show(fig: plt.Figure) -> None:
+    if not PLOT_CONFIG["display_plots"]:
+        return
+    backend = matplotlib.get_backend().lower()
+    if backend.startswith("agg"):
+        return
+    try:
+        fig.canvas.draw_idle()
+        plt.show(block=False)
+        plt.pause(0.001)
+    except Exception:
+        pass
+
+
+def _save_plot(fig: plt.Figure, base_path: Path) -> None:
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    for suffix in (".png", ".svg"):
+        fig.savefig(base_path.with_suffix(suffix), dpi=PLOT_CONFIG["dpi"])
+    _maybe_show(fig)
+
+
+_configure_rcparams()
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 BASE_CONFIG = {
-    "project_root": Path("models_out/classification_20260402_154629"),
-    "split_seed": 4,
-    "model_key": "ChemBERTa", #choices: ["GAT","ChemBERTa","LR","MLP","Hybrid_GAT_FP","Hybrid_GAT_BERT"],
+    "project_root": Path("models_out/classification_20260408_131840"),
+    "split_seed": 3, #
+    "model_key": "ETC", #choices: ["GAT","ChemBERTa","LR","MLP","Hybrid_GAT_FP","Hybrid_GAT_BERT"],
     "seed": 42,
-    "data_path": Path("models_out/classification_20260402_154629/split_seed_4/data/splits/external_test.npz"),
+    "data_path": Path("models_out/classification_20260408_131840/split_seed_3/data/splits/external_test.npz"),
     "task": "classification",
     "n_permutations": 5,
     "epochs": 20,
@@ -77,7 +203,7 @@ BASE_CONFIG = {
     "lr": 1e-3,
     "weight_decay": 1e-2,
     "early_stopping_patience": 10,
-    "output_root": Path("models_out/classification_20260402_154629/split_seed_4/validation"),
+    "output_root": Path("models_out/classification_20260408_131840/split_seed_3/validation"),
     "seed_value": 42,
 }
 
@@ -228,17 +354,55 @@ def _permutation_attempt_limit(n_permutations: int) -> int:
 def _plot_histogram(values: List[float], actual: float, path: Path, title: str, xlabel: str,
                     xlim: Optional[Tuple[float, float]] = None) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.hist(values, bins=30, color="tab:blue", alpha=0.8)
-    ax.axvline(actual, color="red", linewidth=2, linestyle="--", label="Actual")
+    _style_axis(ax)
+    bins = np.linspace(0.0, 1.0, 50)
+    counts, bins, patches = ax.hist(
+        values,
+        bins=bins,
+        color=PLOT_CONFIG["hist_color"],
+        alpha=PLOT_CONFIG["hist_alpha"],
+        edgecolor=PLOT_CONFIG["hist_edgecolor"],
+        linewidth=0.3,
+        rwidth=0.8,
+        zorder=3,
+    )
+    ax.axvline(
+        actual,
+        color=PLOT_CONFIG["scatter_line_color"],
+        linewidth=2,
+        linestyle=PLOT_CONFIG["scatter_line_style"],
+        label="Actual",
+        zorder=4,
+    )
+    for patch in patches:
+        patch.set_joinstyle("round")
+        patch.set_zorder(3)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Count")
     ax.legend()
     if xlim is not None:
         ax.set_xlim(xlim)
-    fig.tight_layout()
-    fig.savefig(path.with_suffix(".png"), dpi=300)
-    fig.savefig(path.with_suffix(".svg"), dpi=300)
+    ax.set_xlim(0.0, 1.0)
+    if counts.size > 0:
+        ax.set_ylim(0, max(1.0, np.nanmax(counts)) * 1.1)
+    stats = np.asarray(values, dtype=float)
+    median = float(np.nanmedian(stats)) if stats.size else float("nan")
+    mean = float(np.nanmean(stats)) if stats.size else float("nan")
+    ax.text(
+        0.04,
+        0.95,
+        f"perm mean {mean:.3f}\nperm median {median:.3f}",
+        ha="left",
+        va="top",
+        transform=ax.transAxes,
+        fontsize=PLOT_CONFIG["label_fontsize"] - 1,
+        fontweight="bold",
+        color=PLOT_CONFIG["tick_color"],
+        bbox=dict(facecolor="white", edgecolor="none", boxstyle="round,pad=0.4", alpha=0.0),
+        zorder=5,
+    )
+    _save_plot(fig, path)
     plt.close(fig)
 
 
@@ -251,12 +415,29 @@ def _plot_scatter(correlations: List[float], metrics: List[float], path: Path, x
     corr_arr = corr_arr[mask]
     metric_arr = metric_arr[mask]
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(corr_arr, metric_arr, color="tab:purple", alpha=0.7)
+    _style_axis(ax)
+    ax.scatter(
+        corr_arr,
+        metric_arr,
+        color=PLOT_CONFIG["scatter_color"],
+        alpha=PLOT_CONFIG["scatter_alpha"],
+        edgecolors="none",
+        linewidths=0,
+        s=40,
+        zorder=3,
+    )
     if corr_arr.size >= 2:
         coeffs = np.polyfit(corr_arr, metric_arr, 1)
         line = np.poly1d(coeffs)
         xs = np.linspace(corr_arr.min(), corr_arr.max(), 50)
-        ax.plot(xs, line(xs), color="k", linewidth=1)
+        ax.plot(
+            xs,
+            line(xs),
+            color=PLOT_CONFIG["scatter_line_color"],
+            linewidth=PLOT_CONFIG["scatter_line_width"],
+            linestyle=PLOT_CONFIG["scatter_line_style"],
+            zorder=4,
+        )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title("Permutation correlation vs. performance")
@@ -264,9 +445,18 @@ def _plot_scatter(correlations: List[float], metrics: List[float], path: Path, x
         ax.set_xlim(xlim)
     if ylim is not None:
         ax.set_ylim(ylim)
-    fig.tight_layout()
-    fig.savefig(path.with_suffix(".png"), dpi=300)
-    fig.savefig(path.with_suffix(".svg"), dpi=300)
+    if corr_arr.size:
+        ax.text(
+            0.98,
+            0.08,
+            f"r̄={np.nanmean(corr_arr):.3f}",
+            ha="right",
+            va="bottom",
+            transform=ax.transAxes,
+            color=PLOT_CONFIG["tick_color"],
+            fontsize=PLOT_CONFIG["label_fontsize"] - 1,
+        )
+    _save_plot(fig, path)
     plt.close(fig)
 
 
@@ -391,12 +581,17 @@ def _build_training_config(task: str, base_config: Dict[str, Any], model_cfg: Di
     return config
 
 
+def _slice_array(array: np.ndarray, indices: Optional[Sequence[int]]) -> np.ndarray:
+    if indices is None:
+        return array
+    return array[np.asarray(indices, dtype=int)]
+
+
 def _align_labels(labels: np.ndarray, valid_indices: Optional[List[int]]) -> np.ndarray:
-    if valid_indices is None:
-        return labels
-    return labels[valid_indices]
+    return _slice_array(labels, valid_indices)
 
 
+# %%
 def main():
     logger = _setup_logger()
     split_dir = BASE_CONFIG["project_root"] / f"split_seed_{BASE_CONFIG['split_seed']}"
@@ -497,7 +692,8 @@ def main():
                 perm_model = clone(trained_model)
                 perm_model.fit(X, y_rand)
                 _, perm_proba = _evaluate_sklearn(perm_model, X, task)
-                perm_metric = _metric_from_probs(_align_labels(y_rand, valid_indices), perm_proba, task)
+                perm_proba_aligned = _slice_array(perm_proba, valid_indices)
+                perm_metric = _metric_from_probs(actual_labels, perm_proba_aligned, task)
                 if math.isnan(perm_metric):
                     logger.warning(
                         "Sklearn permutation %d/%d produced NaN AUC (likely single-class shuffle); retrying.",
@@ -505,8 +701,8 @@ def main():
                         target,
                     )
                     continue
-                aligned_true = _align_labels(y, valid_indices)
-                aligned_rand = _align_labels(y_rand, valid_indices)
+                aligned_true = actual_labels
+                aligned_rand = _slice_array(y_rand, valid_indices)
                 correlations.append(_safe_corr(aligned_true, aligned_rand))
                 rand_metrics.append(perm_metric)
             if len(rand_metrics) < target:
@@ -539,7 +735,8 @@ def main():
                     lr=BASE_CONFIG["lr"],
                 )
                 _, perm_proba = _evaluate_pytorch(perm_model, X, task, device)
-                perm_metric = _metric_from_probs(_align_labels(y_rand, valid_indices), perm_proba, task)
+                perm_proba_aligned = _slice_array(perm_proba, valid_indices)
+                perm_metric = _metric_from_probs(actual_labels, perm_proba_aligned, task)
                 if math.isnan(perm_metric):
                     logger.warning(
                         "PyTorch permutation %d/%d produced NaN metric (single-class); retrying.",
@@ -547,8 +744,8 @@ def main():
                         target,
                     )
                     continue
-                aligned_true = _align_labels(y, valid_indices)
-                aligned_rand = _align_labels(y_rand, valid_indices)
+                aligned_true = actual_labels
+                aligned_rand = _slice_array(y_rand, valid_indices)
                 correlations.append(_safe_corr(aligned_true, aligned_rand))
                 rand_metrics.append(perm_metric)
             if len(rand_metrics) < target:
@@ -593,8 +790,10 @@ def main():
                 )
                 eval_loader = GeometricDataLoader(perm_dataset, batch_size=batch_size, shuffle=False)
                 _, perm_proba = predict_pytorch_model(perm_model, eval_loader, task, threshold=0.5)
-                aligned_labels = _align_labels(y_rand, perm_dataset.valid_indices)
-                perm_metric = _metric_from_probs(aligned_labels, perm_proba, task)
+                perm_valid_indices = perm_dataset.valid_indices
+                aligned_labels = _slice_array(y_rand, perm_valid_indices)
+                perm_proba_aligned = _slice_array(perm_proba, perm_valid_indices)
+                perm_metric = _metric_from_probs(_slice_array(y, perm_valid_indices), perm_proba_aligned, task)
                 if math.isnan(perm_metric):
                     logger.warning(
                         "PyTorch Geometric permutation %d/%d produced NaN metric; retrying with a new shuffle.",
@@ -602,7 +801,7 @@ def main():
                         target,
                     )
                     continue
-                aligned_true = _align_labels(y, perm_dataset.valid_indices)
+                aligned_true = _slice_array(y, perm_valid_indices)
                 correlations.append(_safe_corr(aligned_true, aligned_labels))
                 rand_metrics.append(perm_metric)
             if len(rand_metrics) < target:
@@ -661,8 +860,9 @@ def main():
                 )
                 _, perm_proba = predict_pytorch_model(perm_model, eval_loader, task, threshold=0.5)
                 perm_valid_indices = perm_dataset.valid_indices
-                aligned_labels = _align_labels(y_rand, perm_valid_indices)
-                perm_metric = _metric_from_probs(aligned_labels, perm_proba, task)
+                aligned_labels = _slice_array(y_rand, perm_valid_indices)
+                perm_proba_aligned = _slice_array(perm_proba, perm_valid_indices)
+                perm_metric = _metric_from_probs(_slice_array(hybrid_labels, perm_valid_indices), perm_proba_aligned, task)
                 if math.isnan(perm_metric):
                     logger.warning(
                         "Hybrid permutation %d/%d produced NaN metric; retrying with a new shuffle.",
@@ -670,7 +870,7 @@ def main():
                         target,
                     )
                     continue
-                aligned_true = _align_labels(hybrid_labels, perm_valid_indices)
+                aligned_true = _slice_array(hybrid_labels, perm_valid_indices)
                 correlations.append(_safe_corr(aligned_true, aligned_labels))
                 rand_metrics.append(perm_metric)
             if len(rand_metrics) < target:
