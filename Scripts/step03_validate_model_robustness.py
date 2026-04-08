@@ -122,6 +122,7 @@ except Exception as exc:  # pragma: no cover - environment dependent
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+import matplotlib.ticker as ticker
 
 if PLOT_CONFIG["use_interactive"] and not matplotlib.get_backend().lower().startswith("agg"):
     plt.ion()
@@ -361,6 +362,7 @@ def _plot_histogram(values: List[float],
                     stat_annotations: Optional[Dict[str, float]] = None) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
     _style_axis(ax)
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     bins = np.linspace(0.0, 1.0, 50)
     counts, bins, patches = ax.hist(
         values,

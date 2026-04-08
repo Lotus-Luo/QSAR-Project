@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 BASE_CONFIG = {
-    "project_root": Path("models_out/classification_20260330_151751"),
-    "model_key": "RFC",
+    "project_root": Path("models_out/classification_20260408_131840/split_seed_3"),
+    "model_key": "ETC",
     "seed": 42,
     "task": "classification",  # choices: classification | regression
-    "external_data": Path("models_out/classification_20260330_151751/split_seed_30/data/splits/external_test.npz"),
-    "output_dir": Path("models_out/classification_20260330_151751/shap/RFC/seed_42"),
+    "external_data": Path("models_out/classification_20260408_131840/split_seed_3/data/splits/external_test.npz"),
+    "output_dir": Path("models_out/classification_20260408_131840/split_seed_3/shap/ETC/seed_42"),
     "sample_size": 500,
     "max_display": 20,
     "heatmap_samples": 64,
@@ -51,7 +51,7 @@ except ImportError:  # pragma: no cover - user must install shap to use this scr
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.serif": ["Times New Roman"],
+    "font.serif": ["Cambria"], # "Times New Roman", "Cambria"
     "font.size": 12,
     "axes.labelsize": 14,
     "axes.titlesize": 14,
